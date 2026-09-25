@@ -1,0 +1,37 @@
+services:
+  tcp-warden:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: routewarden/tcp-warden:latest
+    container_name: tcp-warden
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./tcp-warden.yaml:/etc/routewarden/tcp-warden.yaml:ro
+      - tcp-warden-logs:/var/log/routewarden
+    environment:
+      - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - COLLECTIONS=crowdsecurity/linux
+    volumes:
+      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.d/tcp-warden.yaml:ro
+      - ./crowdsec/parsers/s01-parse/routewarden-tcp-warden.yaml:/etc/crowdsec/parsers/s01-parse/routewarden-tcp-warden.yaml:ro
+      - ./crowdsec/scenarios/routewarden-tcp-ssh-bf.yaml:/etc/crowdsec/scenarios/routewarden-tcp-ssh-bf.yaml:ro
+      - ./crowdsec/scenarios/routewarden-tcp-smtp-bf.yaml:/etc/crowdsec/scenarios/routewarden-tcp-smtp-bf.yaml:ro
+      - ./crowdsec/scenarios/routewarden-tcp-portscan.yaml:/etc/crowdsec/scenarios/routewarden-tcp-portscan.yaml:ro
+      - tcp-warden-logs:/var/log/routewarden:ro
+      - crowdsec-db:/var/lib/crowdsec/data
+      - crowdsec-config:/etc/crowdsec
+    ports:
+      - "8080:8080"
+
+volumes:
+  tcp-warden-logs:
+  crowdsec-db:
+  crowdsec-config:

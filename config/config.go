@@ -1,0 +1,427 @@
+package config
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/routewarden/tcp-warden/plugins"
+	_ "github.com/routewarden/tcp-warden/plugins/all"
+)
+
+// Duration is a wrapper around time.Duration that supports YAML unmarshalling
+// from string formats ("1h", "30m", "15s") or integer seconds (3600).
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err == nil {
+		if sec, err := strconv.Atoi(s); err == nil {
+			*d = Duration(time.Duration(sec) * time.Second)
+			return nil
+		}
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		*d = Duration(parsed)
+		return nil
+	}
+
+	var sec int
+	if err := value.Decode(&sec); err == nil {
+		*d = Duration(time.Duration(sec) * time.Second)
+		return nil
+	}
+
+	return fmt.Errorf("duration must be a string (e.g. '1h', '30s') or integer seconds")
+}
+
+func (d Duration) Duration() time.Duration {
+	if time.Duration(d) == 0 {
+		return 0
+	}
+	return time.Duration(d)
+}
+
+func (d Duration) Seconds() int {
+	return int(time.Duration(d).Seconds())
+}
+
+// Config represents the root configuration of tcp-warden.
+type Config struct {
+	Version  string                   `yaml:"version"`
+	Global   GlobalConfig             `yaml:"global"`
+	API      APIConfig                `yaml:"api"`
+	CrowdSec CrowdSecConfig           `yaml:"crowdsec"`
+	Services map[string]ServiceConfig `yaml:"services"`
+}
+
+// GlobalConfig contains daemon-wide defaults.
+type GlobalConfig struct {
+	MaxConnections     int          `yaml:"max_connections"`
+	BanDuration        Duration     `yaml:"ban_duration"`
+	BanAfterFailures   int          `yaml:"ban_after_failures"`
+	TarpitMs           int          `yaml:"tarpit_ms"`
+	LogLevel           string       `yaml:"log_level"`
+	LogFile            string       `yaml:"log_file"`
+	GeoIPDB            string       `yaml:"geoip_db"`
+	IPFilter           IPFilterConfig `yaml:"ip_filter"`
+	GeoBlock           GeoBlockConfig `yaml:"geo_block"`
+}
+
+// APIConfig controls the management REST & SSE API.
+type APIConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Listen    string `yaml:"listen"`     // e.g. ":9091" or "127.0.0.1:9091"
+	AuthToken string `yaml:"auth_token"` // optional Bearer token
+}
+
+// CrowdSecConfig controls the CrowdSec LAPI bouncer integration.
+type CrowdSecConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	LAPIURL         string   `yaml:"lapi_url"`
+	APIKey          string   `yaml:"api_key"`
+	UpdateFrequency Duration `yaml:"update_frequency"`
+	FallbackAction  string   `yaml:"fallback_action"` // "ban", "throttle", "bypass"
+}
+
+// IPFilterConfig defines CIDRs or IPs allowed or denied.
+type IPFilterConfig struct {
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+// GeoBlockConfig defines ISO 3166-1 alpha-2 country rules.
+type GeoBlockConfig struct {
+	DenyCountries  []string `yaml:"deny_countries"`
+	AllowCountries []string `yaml:"allow_countries"`
+}
+
+// RateLimitConfig defines token-bucket rate limiting rules.
+type RateLimitConfig struct {
+	ConnectionsPerMinute int `yaml:"connections_per_minute"`
+	Burst                int `yaml:"burst"`
+}
+
+// ResponseConfig defines action taken when a connection is rejected.
+type ResponseConfig struct {
+	Mode          string `yaml:"mode"`           // "drop" | "reject" | "tarpit" | "silent"
+	TarpitMs      int    `yaml:"tarpit_ms"`      // delay in ms
+	RejectMessage string `yaml:"reject_message"` // custom reject banner/message
+}
+
+// SSHSpecificConfig holds protocol options specific to SSH.
+type SSHSpecificConfig struct {
+	Banner       string `yaml:"banner"`
+	MaxAuthTries int    `yaml:"max_auth_tries"`
+}
+
+// SMTPSpecificConfig holds protocol options specific to SMTP.
+type SMTPSpecificConfig struct {
+	BlockedSenderDomains []string `yaml:"blocked_sender_domains"`
+	RequireSTARTTLS      bool     `yaml:"require_starttls"`
+	MaxRecipients        int      `yaml:"max_recipients"`
+}
+
+// POP3SpecificConfig holds protocol options specific to POP3.
+type POP3SpecificConfig struct {
+	MaxAuthFailures int `yaml:"max_auth_failures"`
+}
+
+// IMAPSpecificConfig holds protocol options specific to IMAP.
+type IMAPSpecificConfig struct {
+	MaxAuthFailures int `yaml:"max_auth_failures"`
+}
+
+// PostgresSpecificConfig holds options specific to PostgreSQL.
+type PostgresSpecificConfig struct {
+	MaxAuthFailures int `yaml:"max_auth_failures"`
+}
+
+// MySQLSpecificConfig holds options specific to MySQL / MariaDB.
+type MySQLSpecificConfig struct {
+	MaxAuthFailures int `yaml:"max_auth_failures"`
+}
+
+// RedisSpecificConfig holds options specific to Redis.
+type RedisSpecificConfig struct {
+	BlockedCommands []string `yaml:"blocked_commands"`
+}
+
+// FTPSpecificConfig holds options specific to FTP.
+type FTPSpecificConfig struct {
+	MaxAuthFailures int `yaml:"max_auth_failures"`
+}
+
+// TLSSpecificConfig holds options specific to TLS SNI domain filtering.
+type TLSSpecificConfig struct {
+	AllowedDomains []string `yaml:"allowed_domains"`
+	BlockedDomains []string `yaml:"blocked_domains"`
+}
+
+// ServiceConfig defines a single TCP proxy service.
+type ServiceConfig struct {
+	Name             string                 `yaml:"-"` // injected from map key
+	Enabled          *bool                  `yaml:"enabled"`
+	Listen           string                 `yaml:"listen"`
+	Upstream         string                 `yaml:"upstream"`
+	Protocol         string                 `yaml:"protocol"` // "ssh" | "smtp" | "pop3" | "imap" | "postgres" | "mysql" | "redis" | "ftp" | "tls" | "tcp"
+	RateLimit        RateLimitConfig        `yaml:"rate_limit"`
+	IPFilter         IPFilterConfig         `yaml:"ip_filter"`
+	GeoBlock         GeoBlockConfig         `yaml:"geo_block"`
+	MaxAuthFailures  int                    `yaml:"max_auth_failures"`
+	BanAfterFailures int                    `yaml:"ban_after_failures"`
+	BanDuration      Duration               `yaml:"ban_duration"`
+	Response         ResponseConfig         `yaml:"response"`
+	PluginConfig     map[string]any         `yaml:"plugin_config,omitempty"`
+	SSH              SSHSpecificConfig      `yaml:"ssh"`
+	SMTP             SMTPSpecificConfig     `yaml:"smtp"`
+	POP3             POP3SpecificConfig     `yaml:"pop3"`
+	IMAP             IMAPSpecificConfig     `yaml:"imap"`
+	Postgres         PostgresSpecificConfig `yaml:"postgres"`
+	MySQL            MySQLSpecificConfig    `yaml:"mysql"`
+	Redis            RedisSpecificConfig    `yaml:"redis"`
+	FTP              FTPSpecificConfig      `yaml:"ftp"`
+	TLS              TLSSpecificConfig      `yaml:"tls"`
+}
+
+// GetPluginOptions collects plugin configuration options from PluginConfig or typed legacy fields.
+func (s *ServiceConfig) GetPluginOptions() map[string]any {
+	opts := make(map[string]any)
+	if s.PluginConfig != nil {
+		for k, v := range s.PluginConfig {
+			opts[k] = v
+		}
+	}
+
+	switch s.Protocol {
+	case "postgres", "postgresql":
+		if s.Postgres.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.Postgres.MaxAuthFailures
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MaxAuthFailures
+		}
+	case "mysql", "mariadb":
+		if s.MySQL.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MySQL.MaxAuthFailures
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MaxAuthFailures
+		}
+	case "redis":
+		if len(s.Redis.BlockedCommands) > 0 {
+			opts["blocked_commands"] = s.Redis.BlockedCommands
+		}
+	case "ftp":
+		if s.FTP.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.FTP.MaxAuthFailures
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MaxAuthFailures
+		}
+	case "tls", "sni":
+		if len(s.TLS.AllowedDomains) > 0 {
+			opts["allowed_domains"] = s.TLS.AllowedDomains
+		}
+		if len(s.TLS.BlockedDomains) > 0 {
+			opts["blocked_domains"] = s.TLS.BlockedDomains
+		}
+	}
+
+	return opts
+}
+
+// IsEnabled returns true unless explicitly disabled.
+func (s *ServiceConfig) IsEnabled() bool {
+	if s.Enabled == nil {
+		return true
+	}
+	return *s.Enabled
+}
+
+// Load reads and parses a YAML configuration file with environment variable expansion.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config file %s: %w", path, err)
+	}
+	return Parse(data)
+}
+
+var envPattern = regexp.MustCompile(`\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}`)
+
+// expandEnvWithDefaults replaces ${VAR} or ${VAR:-default} with env values.
+func expandEnvWithDefaults(s string) string {
+	return envPattern.ReplaceAllStringFunc(s, func(match string) string {
+		sub := envPattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		varName := sub[1]
+		val, exists := os.LookupEnv(varName)
+		if exists && val != "" {
+			return val
+		}
+		if len(sub) >= 3 && sub[2] != "" {
+			return sub[2]
+		}
+		return val
+	})
+}
+
+// Parse parses raw YAML config bytes with defaults and validation.
+func Parse(data []byte) (*Config, error) {
+	expanded := expandEnvWithDefaults(string(data))
+
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+		return nil, fmt.Errorf("parsing YAML config: %w", err)
+	}
+
+	applyDefaults(&cfg)
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validating config: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+func applyDefaults(cfg *Config) {
+	if cfg.Version == "" {
+		cfg.Version = "1.0"
+	}
+	if cfg.Global.BanDuration.Duration() == 0 {
+		cfg.Global.BanDuration = Duration(1 * time.Hour)
+	}
+	if cfg.Global.LogLevel == "" {
+		cfg.Global.LogLevel = "info"
+	}
+	if cfg.Global.LogFile == "" {
+		cfg.Global.LogFile = "/var/log/routewarden/tcp-warden.jsonl"
+	}
+
+	if cfg.API.Listen == "" {
+		cfg.API.Listen = "127.0.0.1:9091"
+	}
+
+	if cfg.CrowdSec.UpdateFrequency.Duration() == 0 {
+		cfg.CrowdSec.UpdateFrequency = Duration(10 * time.Second)
+	}
+	if cfg.CrowdSec.FallbackAction == "" {
+		cfg.CrowdSec.FallbackAction = "ban"
+	}
+
+	for name, svc := range cfg.Services {
+		svc.Name = name
+		if svc.Protocol == "" {
+			svc.Protocol = "tcp"
+		} else {
+			svc.Protocol = strings.ToLower(strings.TrimSpace(svc.Protocol))
+		}
+
+		if svc.Response.Mode == "" {
+			svc.Response.Mode = "drop"
+		}
+
+		if svc.BanDuration.Duration() == 0 {
+			svc.BanDuration = cfg.Global.BanDuration
+		}
+		if svc.BanAfterFailures == 0 && cfg.Global.BanAfterFailures > 0 {
+			svc.BanAfterFailures = cfg.Global.BanAfterFailures
+		}
+		if svc.Response.TarpitMs == 0 && cfg.Global.TarpitMs > 0 {
+			svc.Response.TarpitMs = cfg.Global.TarpitMs
+		}
+
+		cfg.Services[name] = svc
+	}
+}
+
+// Validate checks configuration for syntactic and semantic correctness.
+func (c *Config) Validate() error {
+	if len(c.Services) == 0 {
+		return fmt.Errorf("no services defined in configuration")
+	}
+
+	usedListenPorts := make(map[string]string)
+
+	for name, svc := range c.Services {
+		if !svc.IsEnabled() {
+			continue
+		}
+		if svc.Listen == "" {
+			return fmt.Errorf("service %q: listen address cannot be empty", name)
+		}
+		if svc.Upstream == "" {
+			return fmt.Errorf("service %q: upstream address cannot be empty", name)
+		}
+
+		if prev, exists := usedListenPorts[svc.Listen]; exists {
+			return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, svc.Listen, prev)
+		}
+		usedListenPorts[svc.Listen] = name
+
+		switch svc.Protocol {
+		case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
+			// valid standard built-in protocols
+		default:
+			// Check if supported by registered plugin
+			if p, ok := plugins.Get(svc.Protocol); ok {
+				if err := p.ValidateConfig(svc.GetPluginOptions()); err != nil {
+					return fmt.Errorf("service %q: plugin %q config error: %w", name, p.Manifest().Name, err)
+				}
+			} else {
+				return fmt.Errorf("service %q: unsupported protocol %q", name, svc.Protocol)
+			}
+		}
+
+		// Validate IP filters
+		for _, ipStr := range svc.IPFilter.Allow {
+			if !isValidIPOrCIDR(ipStr) {
+				return fmt.Errorf("service %q: invalid allowed IP/CIDR %q", name, ipStr)
+			}
+		}
+		for _, ipStr := range svc.IPFilter.Deny {
+			if !isValidIPOrCIDR(ipStr) {
+				return fmt.Errorf("service %q: invalid denied IP/CIDR %q", name, ipStr)
+			}
+		}
+
+		// Validate response mode
+		switch strings.ToLower(svc.Response.Mode) {
+		case "drop", "reject", "tarpit", "silent":
+			// valid
+		default:
+			return fmt.Errorf("service %q: unsupported response mode %q (must be 'drop', 'reject', 'tarpit', or 'silent')", name, svc.Response.Mode)
+		}
+	}
+
+	// Validate global IP filters
+	for _, ipStr := range c.Global.IPFilter.Allow {
+		if !isValidIPOrCIDR(ipStr) {
+			return fmt.Errorf("global: invalid allowed IP/CIDR %q", ipStr)
+		}
+	}
+	for _, ipStr := range c.Global.IPFilter.Deny {
+		if !isValidIPOrCIDR(ipStr) {
+			return fmt.Errorf("global: invalid denied IP/CIDR %q", ipStr)
+		}
+	}
+
+	return nil
+}
+
+func isValidIPOrCIDR(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") {
+		_, _, err := net.ParseCIDR(s)
+		return err == nil
+	}
+	return net.ParseIP(s) != nil
+}

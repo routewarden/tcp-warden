@@ -1,0 +1,13 @@
+name: echo_filter
+version: 1.0.0
+description: Example custom RouteWarden plugin that scans client payloads for banned signature strings or exploit keywords
+author: Community Contributor
+protocols:
+  - echo_filter
+  - text_filter
+config:
+  banned_keywords:
+    - "EXPLOIT"
+    - "DROP TABLE"
+    - "MALWARE"
+    - "RCE_TEST"

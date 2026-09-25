@@ -1,0 +1,51 @@
+# Sample tcp-warden.yaml
+version: "1.0"
+
+global:
+  max_connections: 10000
+  ban_duration: "1h"
+  ban_after_failures: 5
+  log_level: "info"
+  log_file: "/var/log/routewarden/tcp-warden.jsonl"
+
+api:
+  enabled: true
+  listen: "127.0.0.1:9091"
+
+crowdsec:
+  enabled: false
+  lapi_url: "http://127.0.0.1:8080"
+  api_key: ""
+  update_frequency: "10s"
+
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+    protocol: "ssh"
+    rate_limit:
+      connections_per_minute: 20
+      burst: 5
+    ip_filter:
+      allow:
+        - "10.0.0.0/8"
+        - "192.168.0.0/16"
+      deny:
+        - "198.51.100.0/24"
+    geo_block:
+      deny_countries:
+        - "RU"
+        - "CN"
+    max_auth_failures: 3
+    ban_after_failures: 3
+    ssh:
+      banner: "RouteWarden SSH Guard"
+
+  smtp:
+    listen: ":2525"
+    upstream: "127.0.0.1:25"
+    protocol: "smtp"
+    smtp:
+      blocked_sender_domains:
+        - "*.tempmail.com"
+        - "spam.org"

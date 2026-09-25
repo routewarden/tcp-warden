@@ -1,0 +1,13 @@
+name: tls_sni
+version: 1.0.0
+description: Zero-decryption TLS ClientHello inspector extracting SNI domain names and enforcing domain allow/deny rules
+author: RouteWarden Team
+protocols:
+  - tls
+  - sni
+config:
+  allowed_domains:
+    - "*.routewarden.io"
+    - "api.internal"
+  blocked_domains:
+    - "*.malware.example"

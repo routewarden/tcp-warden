@@ -104,7 +104,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	// Initialize GeoIP if DB path configured
 	geoip.InitGeoIP(cfg.Global.GeoIPDB)
 
-	bl := NewBanList()
+	bl := NewBanList(cfg.Global.DataDir)
 	ft := NewFailureTracker()
 	rl := NewRateLimiter()
 	stats := NewStatsRegistry()

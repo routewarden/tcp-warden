@@ -11,6 +11,9 @@ global:
   tarpit_ms: 1000
   log_level: "info"
   log_file: "/var/log/routewarden/tcp-warden.jsonl"
+  # Directory for persistent runtime state (bans.db SQLite database survives restarts)
+  # Mount this path as a named Docker volume to preserve bans across container restarts.
+  data_dir: "/var/lib/routewarden"
   geoip_db: "/etc/routewarden/GeoLite2-Country.mmdb"
   ip_filter:
     allow: []

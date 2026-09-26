@@ -379,13 +379,14 @@ func (c *Config) IsPluginEnabled(pluginName string) bool {
 
 // GlobalConfig contains daemon-wide defaults.
 type GlobalConfig struct {
-	MaxConnections     int          `yaml:"max_connections"`
-	BanDuration        Duration     `yaml:"ban_duration"`
-	BanAfterFailures   int          `yaml:"ban_after_failures"`
-	TarpitMs           int          `yaml:"tarpit_ms"`
-	LogLevel           string       `yaml:"log_level"`
-	LogFile            string       `yaml:"log_file"`
-	GeoIPDB            string       `yaml:"geoip_db"`
+	MaxConnections     int            `yaml:"max_connections"`
+	BanDuration        Duration       `yaml:"ban_duration"`
+	BanAfterFailures   int            `yaml:"ban_after_failures"`
+	TarpitMs           int            `yaml:"tarpit_ms"`
+	LogLevel           string         `yaml:"log_level"`
+	LogFile            string         `yaml:"log_file"`
+	GeoIPDB            string         `yaml:"geoip_db"`
+	DataDir            string         `yaml:"data_dir"` // directory for persistent state (bans.db SQLite, etc.)
 	IPFilter           IPFilterConfig `yaml:"ip_filter"`
 	GeoBlock           GeoBlockConfig `yaml:"geo_block"`
 }
@@ -756,6 +757,10 @@ func applyDefaults(cfg *Config) {
 	}
 	// Note: cfg.Global.LogFile intentionally has no default — file logging is opt-in.
 	// Users who want SIEM/CrowdSec log output must set log_file explicitly in their config.
+
+	if cfg.Global.DataDir == "" {
+		cfg.Global.DataDir = "/var/lib/routewarden"
+	}
 
 	if cfg.API.Listen == "" {
 		cfg.API.Listen = "127.0.0.1:9091"

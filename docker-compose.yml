@@ -10,6 +10,7 @@ services:
     volumes:
       - tcp-warden-config:/etc/routewarden
       - tcp-warden-plugins:/var/lib/routewarden/plugins
+      - tcp-warden-data:/var/lib/routewarden
       - tcp-warden-logs:/var/log/routewarden
     environment:
       - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
@@ -35,6 +36,7 @@ services:
 volumes:
   tcp-warden-config:
   tcp-warden-plugins:
+  tcp-warden-data:   # persistent runtime state: bans.db (SQLite)
   tcp-warden-logs:
   crowdsec-db:
   crowdsec-config:

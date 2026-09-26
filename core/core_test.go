@@ -41,7 +41,7 @@ func TestPipelineIPFilterAndBanlist(t *testing.T) {
 		},
 	}
 
-	bl := NewBanList()
+	bl := NewBanList("")
 	ft := NewFailureTracker()
 	rl := NewRateLimiter()
 	bus := NewEventBus()
@@ -128,7 +128,7 @@ func TestAPIServerEndpoints(t *testing.T) {
 		},
 	}
 
-	bl := NewBanList()
+	bl := NewBanList("")
 	stats := NewStatsRegistry()
 	bus := NewEventBus()
 
@@ -229,7 +229,7 @@ func TestPipeline_ModularPluginAutoDisable(t *testing.T) {
 		},
 	}
 
-	bl := NewBanList()
+	bl := NewBanList("")
 	ft := NewFailureTracker()
 	rl := NewRateLimiter()
 	bus := NewEventBus()
@@ -293,7 +293,7 @@ func TestPipeline_GlobalGeoBlockAllowCountries(t *testing.T) {
 		},
 	}
 
-	pipe := NewPipeline(cfg, NewBanList(), NewFailureTracker(), NewRateLimiter(), NewEventBus(), NewStatsRegistry(), nil, nil)
+	pipe := NewPipeline(cfg, NewBanList(""), NewFailureTracker(), NewRateLimiter(), NewEventBus(), NewStatsRegistry(), nil, nil)
 	svc := cfg.Services["geo-svc"]
 
 	// "FR" is not in US/CA -> should be blocked

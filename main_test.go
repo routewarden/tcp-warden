@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -40,5 +43,22 @@ func TestNormalizeArgs(t *testing.T) {
 				t.Errorf("expected %v, got %v", tc.expected, actual)
 			}
 		})
+	}
+}
+
+func TestVersionMatchesJSON(t *testing.T) {
+	data, err := os.ReadFile("version.json")
+	if err != nil {
+		t.Fatalf("failed to read version.json: %v", err)
+	}
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatalf("failed to parse version.json: %v", err)
+	}
+	expected := strings.TrimPrefix(v.Version, "v")
+	if version != expected {
+		t.Errorf("main.go version (%q) does not match version.json (%q). Run ./scripts/update-version.sh", version, expected)
 	}
 }

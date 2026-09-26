@@ -1,0 +1,10 @@
+.git
+.github
+.plugins_cache
+*.log
+*.jsonl
+*.test
+*.out
+tcp-warden
+tcp-warden.exe
+*.tmp

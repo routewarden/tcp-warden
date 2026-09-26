@@ -203,11 +203,9 @@ func TestPipeline_ModularPluginAutoDisable(t *testing.T) {
 	broken := &brokenSelfTestPlugin{}
 	plugins.Register(broken)
 
-	// Run self-tests
-	results := plugins.RunSelfTests()
-	bRes, ok := results["broken-test-plugin"]
-	if !ok || bRes.Passed {
-		t.Fatalf("expected broken-test-plugin to fail self-test")
+	// Attempt to enable it (should fail self-test)
+	if err := plugins.Enable("broken-test-plugin"); err == nil {
+		t.Fatalf("expected enabling broken-test-plugin to fail")
 	}
 	if plugins.IsActive("broken-proto") {
 		t.Fatalf("broken-proto should NOT be active")
@@ -271,4 +269,38 @@ func TestPipeline_ModularPluginAutoDisable(t *testing.T) {
 		t.Errorf("expected blocked connection metric incremented")
 	}
 }
+
+func TestPipeline_GlobalGeoBlockAllowCountries(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		Global: config.GlobalConfig{
+			GeoBlock: config.GeoBlockConfig{
+				AllowCountries: []string{"US", "CA"},
+			},
+		},
+		Services: map[string]config.ServiceConfig{
+			"geo-svc": {
+				Name:     "geo-svc",
+				Protocol: "tcp",
+				Response: config.ResponseConfig{
+					Mode: "drop",
+				},
+			},
+		},
+	}
+
+	pipe := NewPipeline(cfg, NewBanList(), NewFailureTracker(), NewRateLimiter(), NewEventBus(), NewStatsRegistry(), nil, nil)
+	svc := cfg.Services["geo-svc"]
+
+	// "FR" is not in US/CA -> should be blocked
+	if !pipe.isCountryBlocked("FR", &svc) {
+		t.Errorf("expected FR to be blocked by global allowlist")
+	}
+
+	// "US" is in US/CA -> should be allowed
+	if pipe.isCountryBlocked("US", &svc) {
+		t.Errorf("expected US to be allowed by global allowlist")
+	}
+}
+
 

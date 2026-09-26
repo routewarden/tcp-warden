@@ -8,7 +8,8 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - ./tcp-warden.yaml:/etc/routewarden/tcp-warden.yaml:ro
+      - tcp-warden-config:/etc/routewarden
+      - tcp-warden-plugins:/var/lib/routewarden/plugins
       - tcp-warden-logs:/var/log/routewarden
     environment:
       - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
@@ -32,6 +33,8 @@ services:
       - "8080:8080"
 
 volumes:
+  tcp-warden-config:
+  tcp-warden-plugins:
   tcp-warden-logs:
   crowdsec-db:
   crowdsec-config:

@@ -113,7 +113,17 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 		}
 	}
 
-	// Stage 7: Upstream Connection and Protocol Inspection
+	// Stage 7: Protocol Validation and Upstream Connection
+	if !isStandardProtocol(svc.Protocol) {
+		if !plugins.IsActive(svc.Protocol) {
+			st.AddBlocked()
+			status, reason, _ := plugins.GetStatus(svc.Protocol)
+			p.emitEvent(svc, clientIP, geo, "blocked", fmt.Sprintf("plugin_unavailable: %s (%s)", status, reason), 0, 0, start)
+			p.applyResponse(conn, svc, "plugin_unavailable")
+			return
+		}
+	}
+
 	upstream, err := protocol.DialUpstream(svc.Upstream)
 	if err != nil {
 		st.AddBlocked()
@@ -122,13 +132,26 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 	}
 	defer upstream.Close()
 
-	st.AddAllowed()
-
-	bytesIn, bytesOut := p.proxyWithInspection(ctx, conn, upstream, svc, clientIP, geo)
+	bytesIn, bytesOut, wasBlocked, reason := p.proxyWithInspection(ctx, conn, upstream, svc, clientIP, geo)
 
 	// Stage 8: Accounting and Security Event Logging
 	st.AddBytes(bytesIn, bytesOut)
-	p.emitEvent(svc, clientIP, geo, "allowed", "session_complete", bytesIn, bytesOut, start)
+	if wasBlocked {
+		st.AddBlocked()
+		p.emitEvent(svc, clientIP, geo, "blocked", reason, bytesIn, bytesOut, start)
+	} else {
+		st.AddAllowed()
+		p.emitEvent(svc, clientIP, geo, "allowed", "session_complete", bytesIn, bytesOut, start)
+	}
+}
+
+func isStandardProtocol(proto string) bool {
+	switch strings.ToLower(strings.TrimSpace(proto)) {
+	case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Pipeline) proxyWithInspection(
@@ -138,7 +161,7 @@ func (p *Pipeline) proxyWithInspection(
 	svc *config.ServiceConfig,
 	clientIP string,
 	geo geoip.GeoResult,
-) (int64, int64) {
+) (int64, int64, bool, string) {
 	onFailure := func() {
 		p.recordAuthFailure(svc, clientIP, geo)
 	}
@@ -147,14 +170,14 @@ func (p *Pipeline) proxyWithInspection(
 	case "ssh":
 		return p.handleSSH(client, upstream, svc, onFailure)
 	case "smtp":
-		return p.handleSMTP(client, upstream, svc, onFailure)
+		return p.handleSMTP(client, upstream, svc, onFailure, clientIP, geo)
 	case "pop3":
-		return p.handlePOP3(client, upstream, svc, onFailure)
+		return p.handlePOP3(client, upstream, svc, onFailure, clientIP, geo)
 	case "imap":
-		return p.handleIMAP(client, upstream, svc, onFailure)
+		return p.handleIMAP(client, upstream, svc, onFailure, clientIP, geo)
 	case "tcp", "generic":
 		res := protocol.Proxy(client, upstream)
-		return res.BytesIn, res.BytesOut
+		return res.BytesIn, res.BytesOut, false, ""
 	default:
 		// Route through modular plugin architecture
 		return p.handlePlugin(client, upstream, svc, onFailure, clientIP, geo)
@@ -168,21 +191,22 @@ func (p *Pipeline) handlePlugin(
 	onFailure func(),
 	clientIP string,
 	geo geoip.GeoResult,
-) (int64, int64) {
+) (int64, int64, bool, string) {
 	plugin, ok := plugins.Get(svc.Protocol)
 	if !ok {
-		res := protocol.Proxy(client, upstream)
-		return res.BytesIn, res.BytesOut
+		log.Printf("⚠️ [WARN] Service %q: connection rejected because plugin for protocol %q is not installed",
+			svc.Name, svc.Protocol)
+		p.applyResponse(client, svc, "plugin_not_installed")
+		return 0, 0, true, "plugin_not_installed"
 	}
 
 	// 1. Verify plugin health status (Auto-disable enforcement)
 	if !plugins.IsActive(svc.Protocol) {
-		status, testErr := plugins.GetStatus(svc.Protocol)
-		log.Printf("⚠️ [WARN] Service %q: connection rejected because plugin %q is %s (self-test error: %v)",
-			svc.Name, plugin.Manifest().Name, status, testErr)
-		p.emitEvent(svc, clientIP, geo, "blocked", fmt.Sprintf("plugin_disabled: %s", status), 0, 0, time.Now())
+		status, reason, testErr := plugins.GetStatus(svc.Protocol)
+		log.Printf("⚠️ [WARN] Service %q: connection rejected because plugin %q is %s (%s: %v)",
+			svc.Name, plugin.Manifest().Name, status, reason, testErr)
 		p.applyResponse(client, svc, "plugin_disabled")
-		return 0, 0
+		return 0, 0, true, fmt.Sprintf("plugin_disabled: %s", status)
 	}
 
 	// 2. Instantiate inspector with service options
@@ -191,7 +215,7 @@ func (p *Pipeline) handlePlugin(
 		log.Printf("⚠️ [WARN] Service %q: failed creating inspector for plugin %q: %v",
 			svc.Name, plugin.Manifest().Name, err)
 		res := protocol.Proxy(client, upstream)
-		return res.BytesIn, res.BytesOut
+		return res.BytesIn, res.BytesOut, false, ""
 	}
 
 	// 3. Prepare plugin context with security callbacks
@@ -206,19 +230,16 @@ func (p *Pipeline) handlePlugin(
 
 	// 4. Run protocol inspection
 	res, wasBlocked, reason, _ := inspector.Run(pCtx, client, upstream)
-	if wasBlocked {
-		p.emitEvent(svc, clientIP, geo, "blocked", reason, res.BytesIn, res.BytesOut, time.Now())
-	}
-	return res.BytesIn, res.BytesOut
+	return res.BytesIn, res.BytesOut, wasBlocked, reason
 }
 
-func (p *Pipeline) handleSSH(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64) {
+func (p *Pipeline) handleSSH(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64, bool, string) {
 	inspector := protocol.SSHInspector{}
 	reader, res := inspector.Inspect(client)
 
 	if res.IsSSH1 {
 		protocol.RejectSSH1(client)
-		return 0, 0
+		return 0, 0, true, "ssh1_rejected"
 	}
 
 	bufferedClient := &protocol.BufferedConn{
@@ -230,10 +251,10 @@ func (p *Pipeline) handleSSH(client, upstream net.Conn, svc *config.ServiceConfi
 	wrappedUpstream := monitor.WrapUpstream(upstream)
 
 	proxyRes := protocol.Proxy(bufferedClient, wrappedUpstream)
-	return proxyRes.BytesIn, proxyRes.BytesOut
+	return proxyRes.BytesIn, proxyRes.BytesOut, false, ""
 }
 
-func (p *Pipeline) handleSMTP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64) {
+func (p *Pipeline) handleSMTP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
 	opts := protocol.SMTPInspectorOptions{
 		BlockedSenderDomains: svc.SMTP.BlockedSenderDomains,
 		RequireSTARTTLS:      svc.SMTP.RequireSTARTTLS,
@@ -241,28 +262,25 @@ func (p *Pipeline) handleSMTP(client, upstream net.Conn, svc *config.ServiceConf
 	}
 	proxy := protocol.NewSMTPProxy(client, upstream, opts)
 	res, wasBlocked, reason := proxy.Run()
-	if wasBlocked {
-		p.emitEvent(svc, parseClientIP(client.RemoteAddr().String()), geoip.LookupIP(parseClientIP(client.RemoteAddr().String())), "blocked", reason, res.BytesIn, res.BytesOut, time.Now())
-	}
-	return res.BytesIn, res.BytesOut
+	return res.BytesIn, res.BytesOut, wasBlocked, reason
 }
 
-func (p *Pipeline) handlePOP3(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64) {
+func (p *Pipeline) handlePOP3(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
 	opts := protocol.POP3InspectorOptions{
 		OnAuthFailure: onFailure,
 	}
 	proxy := protocol.NewPOP3Proxy(client, upstream, opts)
 	res, _, _ := proxy.Run()
-	return res.BytesIn, res.BytesOut
+	return res.BytesIn, res.BytesOut, false, ""
 }
 
-func (p *Pipeline) handleIMAP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64) {
+func (p *Pipeline) handleIMAP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
 	opts := protocol.IMAPInspectorOptions{
 		OnAuthFailure: onFailure,
 	}
 	proxy := protocol.NewIMAPProxy(client, upstream, opts)
 	res, _, _ := proxy.Run()
-	return res.BytesIn, res.BytesOut
+	return res.BytesIn, res.BytesOut, false, ""
 }
 
 func (p *Pipeline) recordAuthFailure(svc *config.ServiceConfig, clientIP string, geo geoip.GeoResult) {
@@ -350,6 +368,17 @@ func (p *Pipeline) isCountryBlocked(countryCode string, svc *config.ServiceConfi
 	if len(svc.GeoBlock.AllowCountries) > 0 {
 		allowed := false
 		for _, c := range svc.GeoBlock.AllowCountries {
+			if strings.EqualFold(c, codeUpper) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return true
+		}
+	} else if len(p.cfg.Global.GeoBlock.AllowCountries) > 0 {
+		allowed := false
+		for _, c := range p.cfg.Global.GeoBlock.AllowCountries {
 			if strings.EqualFold(c, codeUpper) {
 				allowed = true
 				break

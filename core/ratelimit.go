@@ -1,8 +1,14 @@
 package core
 
 import (
+	"context"
 	"sync"
 	"time"
+)
+
+const (
+	rateLimiterBucketTTL   = 10 * time.Minute
+	failureTrackerWindowTTL = 30 * time.Minute
 )
 
 type tokenBucket struct {
@@ -10,12 +16,14 @@ type tokenBucket struct {
 	capacity   float64
 	refillRate float64 // tokens per second
 	lastRefill time.Time
+	lastAccess time.Time
 }
 
 func (b *tokenBucket) allow() bool {
 	now := time.Now()
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	b.lastRefill = now
+	b.lastAccess = now
 
 	b.tokens += elapsed * b.refillRate
 	if b.tokens > b.capacity {
@@ -33,13 +41,18 @@ func (b *tokenBucket) allow() bool {
 type RateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*tokenBucket // key = service:ip
+	cancel  context.CancelFunc
 }
 
-// NewRateLimiter creates a new RateLimiter.
+// NewRateLimiter creates a new RateLimiter and starts background bucket cleanup.
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
+	ctx, cancel := context.WithCancel(context.Background())
+	rl := &RateLimiter{
 		buckets: make(map[string]*tokenBucket),
+		cancel:  cancel,
 	}
+	go rl.cleanupLoop(ctx)
+	return rl
 }
 
 // Allow checks if a connection from ip on service is allowed under limits.
@@ -69,6 +82,7 @@ func (r *RateLimiter) Allow(service, ip string, connsPerMin, burst int) bool {
 			capacity:   capacity,
 			refillRate: refillRate,
 			lastRefill: time.Now(),
+			lastAccess: time.Now(),
 		}
 		r.buckets[key] = b
 		return true
@@ -77,17 +91,50 @@ func (r *RateLimiter) Allow(service, ip string, connsPerMin, burst int) bool {
 	return b.allow()
 }
 
+// Stop shuts down the background cleanup goroutine.
+func (r *RateLimiter) Stop() {
+	if r.cancel != nil {
+		r.cancel()
+	}
+}
+
+func (r *RateLimiter) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-rateLimiterBucketTTL)
+			r.mu.Lock()
+			for key, b := range r.buckets {
+				if b.lastAccess.Before(cutoff) {
+					delete(r.buckets, key)
+				}
+			}
+			r.mu.Unlock()
+		}
+	}
+}
+
 // FailureTracker tracks auth failures per IP within a sliding window.
 type FailureTracker struct {
 	mu       sync.Mutex
 	failures map[string][]time.Time // key = service:ip
+	cancel   context.CancelFunc
 }
 
-// NewFailureTracker creates a new FailureTracker.
+// NewFailureTracker creates a new FailureTracker and starts background key cleanup.
 func NewFailureTracker() *FailureTracker {
-	return &FailureTracker{
+	ctx, cancel := context.WithCancel(context.Background())
+	ft := &FailureTracker{
 		failures: make(map[string][]time.Time),
+		cancel:   cancel,
 	}
+	go ft.cleanupLoop(ctx)
+	return ft
 }
 
 // RecordFailure records an authentication failure and returns the failure count in the last window.
@@ -117,4 +164,33 @@ func (f *FailureTracker) Reset(service, ip string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.failures, service+":"+ip)
+}
+
+// Stop shuts down the background cleanup goroutine.
+func (f *FailureTracker) Stop() {
+	if f.cancel != nil {
+		f.cancel()
+	}
+}
+
+func (f *FailureTracker) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-failureTrackerWindowTTL)
+			f.mu.Lock()
+			for key, times := range f.failures {
+				// Evict key if all timestamps are older than the eviction TTL.
+				if len(times) == 0 || times[len(times)-1].Before(cutoff) {
+					delete(f.failures, key)
+				}
+			}
+			f.mu.Unlock()
+		}
+	}
 }

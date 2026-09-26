@@ -21,26 +21,30 @@ const (
 
 // PluginInfo provides human-readable summary of a registered plugin.
 type PluginInfo struct {
-	Name        string       `json:"name"`
-	Version     string       `json:"version"`
-	Description string       `json:"description"`
-	Protocols   []string     `json:"protocols"`
-	Status      PluginStatus `json:"status"`
-	TestError   string       `json:"test_error,omitempty"`
-	TestTime    time.Time    `json:"test_time,omitempty"`
+	Name          string       `json:"name"`
+	Version       string       `json:"version"`
+	Description   string       `json:"description"`
+	Protocols     []string     `json:"protocols"`
+	Enabled       bool         `json:"enabled"`
+	Status        PluginStatus `json:"status"`
+	DisableReason string       `json:"disable_reason,omitempty"`
+	TestError     string       `json:"test_error,omitempty"`
+	TestTime      time.Time    `json:"test_time,omitempty"`
 }
 
 type entry struct {
-	plugin    sdk.Plugin
-	status    PluginStatus
-	testError error
-	testTime  time.Time
+	plugin        sdk.Plugin
+	enabled       bool
+	status        PluginStatus
+	disableReason string
+	testError     error
+	testTime      time.Time
 }
 
 type Registry struct {
-	mu           sync.RWMutex
-	plugins      map[string]*entry // keyed by plugin name (lowercase)
-	protocolMap  map[string]string // protocol -> plugin name
+	mu          sync.RWMutex
+	plugins     map[string]*entry // keyed by plugin name (lowercase)
+	protocolMap map[string]string // protocol -> plugin name
 }
 
 var globalRegistry = NewRegistry()
@@ -59,6 +63,7 @@ func Global() *Registry {
 }
 
 // Register registers a plugin with the global registry.
+// Non-standard plugins are registered as DISABLED by default until explicitly enabled.
 func Register(p sdk.Plugin) {
 	globalRegistry.Register(p)
 }
@@ -71,8 +76,10 @@ func (r *Registry) Register(p sdk.Plugin) {
 	nameKey := strings.ToLower(manifest.Name)
 
 	r.plugins[nameKey] = &entry{
-		plugin: p,
-		status: StatusPending,
+		plugin:        p,
+		enabled:       false, // pre-shipped non-standard plugins disabled by default
+		status:        StatusDisabled,
+		disableReason: "disabled by default",
 	}
 
 	for _, proto := range manifest.Protocols {
@@ -80,40 +87,165 @@ func (r *Registry) Register(p sdk.Plugin) {
 	}
 }
 
-// RunSelfTests executes SelfTest() on all registered plugins and updates their status.
-// If SelfTest fails, status becomes StatusDisabled. If it passes, status becomes StatusActive.
+// Enable enables a plugin and runs its pre-flight self-test.
+// If the self-test fails, the plugin remains DISABLED and an error is returned.
+func Enable(nameOrProto string) error {
+	return globalRegistry.Enable(nameOrProto)
+}
+
+func (r *Registry) Enable(nameOrProto string) error {
+	// 1. Locate the entry under a read lock (non-blocking for live traffic).
+	r.mu.RLock()
+	key := strings.ToLower(nameOrProto)
+	ent, ok := r.plugins[key]
+	if !ok {
+		if pluginName, found := r.protocolMap[key]; found {
+			ent = r.plugins[pluginName]
+			ok = true
+		}
+	}
+	r.mu.RUnlock()
+
+	if !ok || ent == nil {
+		return fmt.Errorf("plugin %q not found", nameOrProto)
+	}
+
+	// 2. Run self-test without holding any lock (may take up to 3 seconds).
+	start := time.Now()
+	err := ent.plugin.SelfTest()
+	testTime := time.Now()
+	_ = start
+
+	// 3. Commit result under write lock.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ent.testTime = testTime
+	if err != nil {
+		ent.enabled = false
+		ent.status = StatusDisabled
+		ent.disableReason = "self-test failed"
+		ent.testError = err
+		return fmt.Errorf("plugin %q self-test failed: %w", ent.plugin.Manifest().Name, err)
+	}
+
+	ent.enabled = true
+	ent.status = StatusActive
+	ent.disableReason = ""
+	ent.testError = nil
+	return nil
+}
+
+// Disable marks a plugin as disabled.
+func Disable(nameOrProto string, reason string) error {
+	return globalRegistry.Disable(nameOrProto, reason)
+}
+
+func (r *Registry) Disable(nameOrProto string, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := strings.ToLower(nameOrProto)
+	ent, ok := r.plugins[key]
+	if !ok {
+		if pluginName, found := r.protocolMap[key]; found {
+			ent = r.plugins[pluginName]
+			ok = true
+		}
+	}
+	if !ok || ent == nil {
+		return fmt.Errorf("plugin %q not found", nameOrProto)
+	}
+
+	if reason == "" {
+		reason = "disabled by administrator"
+	}
+	ent.enabled = false
+	ent.status = StatusDisabled
+	ent.disableReason = reason
+	return nil
+}
+
+// ApplyConfiguration applies enabled and disabled plugin lists from configuration.
+func ApplyConfiguration(enabled []string, disabled []string) map[string]error {
+	return globalRegistry.ApplyConfiguration(enabled, disabled)
+}
+
+func (r *Registry) ApplyConfiguration(enabled []string, disabled []string) map[string]error {
+	errs := make(map[string]error)
+
+	for _, name := range enabled {
+		if err := r.Enable(name); err != nil {
+			errs[name] = err
+		}
+	}
+
+	for _, name := range disabled {
+		_ = r.Disable(name, "disabled in configuration")
+	}
+
+	return errs
+}
+
+// RunSelfTests executes SelfTest() on all registered plugins (or enabled ones).
 func RunSelfTests() map[string]sdk.TestResult {
 	return globalRegistry.RunSelfTests()
 }
 
 func (r *Registry) RunSelfTests() map[string]sdk.TestResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	type target struct {
+		name   string
+		plugin sdk.Plugin
+	}
 
-	results := make(map[string]sdk.TestResult)
-
+	// 1. Snapshot plugin list under read lock so live traffic is not blocked during tests
+	r.mu.RLock()
+	targets := make([]target, 0, len(r.plugins))
 	for name, ent := range r.plugins {
+		targets = append(targets, target{name: name, plugin: ent.plugin})
+	}
+	r.mu.RUnlock()
+
+	// 2. Run self-tests outside locks
+	type outcome struct {
+		target target
+		res    sdk.TestResult
+	}
+	outcomes := make([]outcome, 0, len(targets))
+	for _, t := range targets {
 		start := time.Now()
-		err := ent.plugin.SelfTest()
+		err := t.plugin.SelfTest()
 		dur := time.Since(start)
 
 		res := sdk.TestResult{
-			PluginName: ent.plugin.Manifest().Name,
+			PluginName: t.plugin.Manifest().Name,
 			Passed:     err == nil,
 			Error:      err,
 			Duration:   dur,
 		}
+		outcomes = append(outcomes, outcome{target: t, res: res})
+	}
 
-		ent.testTime = time.Now()
-		if err != nil {
-			ent.status = StatusDisabled
-			ent.testError = err
-		} else {
-			ent.status = StatusActive
-			ent.testError = nil
+	// 3. Commit results under write lock
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	results := make(map[string]sdk.TestResult, len(outcomes))
+	now := time.Now()
+	for _, o := range outcomes {
+		results[o.target.name] = o.res
+		if ent, ok := r.plugins[o.target.name]; ok {
+			ent.testTime = now
+			if o.res.Error != nil {
+				ent.status = StatusDisabled
+				ent.testError = o.res.Error
+				ent.disableReason = "self-test failed"
+			} else if ent.enabled {
+				ent.status = StatusActive
+				ent.testError = nil
+				ent.disableReason = ""
+			}
 		}
-
-		results[name] = res
 	}
 
 	return results
@@ -121,33 +253,54 @@ func (r *Registry) RunSelfTests() map[string]sdk.TestResult {
 
 // RunSelfTest runs self test for a single plugin.
 func (r *Registry) RunSelfTest(name string) (sdk.TestResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	nameKey := strings.ToLower(name)
+
+	// 1. Find plugin under read lock
+	r.mu.RLock()
 	ent, exists := r.plugins[nameKey]
 	if !exists {
+		if pName, found := r.protocolMap[nameKey]; found {
+			nameKey = pName
+			ent, exists = r.plugins[pName]
+		}
+	}
+	var p sdk.Plugin
+	if exists && ent != nil {
+		p = ent.plugin
+	}
+	r.mu.RUnlock()
+
+	if !exists || p == nil {
 		return sdk.TestResult{}, fmt.Errorf("plugin %q not found", name)
 	}
 
+	// 2. Run self-test outside locks
 	start := time.Now()
-	err := ent.plugin.SelfTest()
+	err := p.SelfTest()
 	dur := time.Since(start)
 
 	res := sdk.TestResult{
-		PluginName: ent.plugin.Manifest().Name,
+		PluginName: p.Manifest().Name,
 		Passed:     err == nil,
 		Error:      err,
 		Duration:   dur,
 	}
 
-	ent.testTime = time.Now()
-	if err != nil {
-		ent.status = StatusDisabled
-		ent.testError = err
-	} else {
-		ent.status = StatusActive
-		ent.testError = nil
+	// 3. Commit status under write lock
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if ent, ok := r.plugins[nameKey]; ok {
+		ent.testTime = time.Now()
+		if err != nil {
+			ent.status = StatusDisabled
+			ent.testError = err
+			ent.disableReason = "self-test failed"
+		} else if ent.enabled {
+			ent.status = StatusActive
+			ent.testError = nil
+			ent.disableReason = ""
+		}
 	}
 
 	return res, nil
@@ -190,7 +343,30 @@ func (r *Registry) GetByName(name string) (sdk.Plugin, bool) {
 	return ent.plugin, true
 }
 
-// IsActive returns true if the plugin exists and passed its self-test.
+// IsEnabled returns true if the plugin is explicitly enabled.
+func IsEnabled(nameOrProtocol string) bool {
+	return globalRegistry.IsEnabled(nameOrProtocol)
+}
+
+func (r *Registry) IsEnabled(nameOrProtocol string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	key := strings.ToLower(nameOrProtocol)
+	ent, ok := r.plugins[key]
+	if !ok {
+		if pluginName, found := r.protocolMap[key]; found {
+			ent = r.plugins[pluginName]
+			ok = true
+		}
+	}
+	if !ok || ent == nil {
+		return false
+	}
+	return ent.enabled
+}
+
+// IsActive returns true if the plugin exists, is enabled, and passed its self-test.
 func IsActive(nameOrProtocol string) bool {
 	return globalRegistry.IsActive(nameOrProtocol)
 }
@@ -211,15 +387,15 @@ func (r *Registry) IsActive(nameOrProtocol string) bool {
 	if !ok || ent == nil {
 		return false
 	}
-	return ent.status == StatusActive
+	return ent.enabled && ent.status == StatusActive
 }
 
-// GetStatus returns the operational status and any self-test failure reason.
-func GetStatus(nameOrProtocol string) (PluginStatus, error) {
+// GetStatus returns the operational status, disable reason, and any test error.
+func GetStatus(nameOrProtocol string) (PluginStatus, string, error) {
 	return globalRegistry.GetStatus(nameOrProtocol)
 }
 
-func (r *Registry) GetStatus(nameOrProtocol string) (PluginStatus, error) {
+func (r *Registry) GetStatus(nameOrProtocol string) (PluginStatus, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -233,9 +409,9 @@ func (r *Registry) GetStatus(nameOrProtocol string) (PluginStatus, error) {
 	}
 
 	if !ok || ent == nil {
-		return StatusPending, fmt.Errorf("plugin %q not found", nameOrProtocol)
+		return StatusDisabled, "plugin not found", fmt.Errorf("plugin %q not found", nameOrProtocol)
 	}
-	return ent.status, ent.testError
+	return ent.status, ent.disableReason, ent.testError
 }
 
 // List returns a sorted list of registered plugin descriptions.
@@ -255,13 +431,15 @@ func (r *Registry) List() []PluginInfo {
 			testErrStr = ent.testError.Error()
 		}
 		list = append(list, PluginInfo{
-			Name:        m.Name,
-			Version:     m.Version,
-			Description: m.Description,
-			Protocols:   m.Protocols,
-			Status:      ent.status,
-			TestError:   testErrStr,
-			TestTime:    ent.testTime,
+			Name:          m.Name,
+			Version:       m.Version,
+			Description:   m.Description,
+			Protocols:     m.Protocols,
+			Enabled:       ent.enabled,
+			Status:        ent.status,
+			DisableReason: ent.disableReason,
+			TestError:     testErrStr,
+			TestTime:      ent.testTime,
 		})
 	}
 

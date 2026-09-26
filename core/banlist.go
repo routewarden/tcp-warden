@@ -101,11 +101,18 @@ func (b *BanList) All() []BanEntry {
 	return res
 }
 
-// Count returns the number of active bans.
+// Count returns the number of currently active (non-expired) bans.
 func (b *BanList) Count() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return len(b.entries)
+	now := time.Now()
+	count := 0
+	for _, entry := range b.entries {
+		if entry.Permanent || now.Before(entry.ExpiresAt) {
+			count++
+		}
+	}
+	return count
 }
 
 // Close stops background cleanup routines.

@@ -2,9 +2,33 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/routewarden/tcp-warden/plugins"
+	"github.com/routewarden/tcp-warden/plugins/sdk"
 )
+
+type mockValidationPlugin struct{}
+
+func (m *mockValidationPlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{
+		Name:      "postgres",
+		Version:   "1.0.0",
+		Protocols: []string{"postgres"},
+	}
+}
+
+func (m *mockValidationPlugin) ValidateConfig(map[string]any) error { return nil }
+func (m *mockValidationPlugin) CreateInspector(map[string]any) (sdk.Inspector, error) {
+	return nil, nil
+}
+func (m *mockValidationPlugin) SelfTest() error { return nil }
+
+func init() {
+	plugins.Register(&mockValidationPlugin{})
+}
 
 func TestParseYAML(t *testing.T) {
 	os.Setenv("TEST_LAPI_KEY", "secret-key-123")
@@ -139,7 +163,18 @@ services:
     upstream: "127.0.0.1:22"
     protocol: "unknown_proto"
 `,
-			wantErr: "unsupported protocol",
+			wantErr: "requires plugin",
+		},
+		{
+			name: "disabled by default plugin error",
+			yaml: `
+services:
+  svc1:
+    listen: ":5433"
+    upstream: "127.0.0.1:5432"
+    protocol: "postgres"
+`,
+			wantErr: "requires plugin \"postgres\" which is DISABLED by default",
 		},
 	}
 
@@ -156,6 +191,108 @@ services:
 	}
 }
 
+func TestPluginEnablementValidation(t *testing.T) {
+	yamlData := `
+version: "1.0"
+plugins:
+  postgres:
+    enabled: true
+  mongodb:
+    enabled: true
+    source: "https://github.com/routewarden/plugin-mongodb"
+services:
+  db:
+    listen: ":5433"
+    upstream: "127.0.0.1:5432"
+    protocol: "postgres"
+`
+	cfg, err := Parse([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("expected enabled plugin configuration to pass validation, got: %v", err)
+	}
+	if !cfg.IsPluginEnabled("postgres") {
+		t.Errorf("expected postgres to be enabled")
+	}
+	if cfg.Plugins.Entries["mongodb"].Source != "https://github.com/routewarden/plugin-mongodb" {
+		t.Errorf("expected mongodb source to be parsed, got %s", cfg.Plugins.Entries["mongodb"].Source)
+	}
+}
+
+func TestUpdatePluginEnablement(t *testing.T) {
+	initialYAML := `# Header comment
+version: "1.0"
+
+# Plugin section comment
+plugins:
+  postgres:
+    enabled: false # inline comment
+  mysql:
+    enabled: false
+
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+    protocol: "ssh"
+`
+	tmpFile, err := os.CreateTemp("", "tcp-warden-test-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(initialYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	// 1. Enable postgres
+	if err := UpdatePluginEnablement(tmpFile.Name(), "postgres", true); err != nil {
+		t.Fatalf("failed to update postgres to true: %v", err)
+	}
+
+	cfg1, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to load updated config: %v", err)
+	}
+	if !cfg1.IsPluginEnabled("postgres") {
+		t.Errorf("expected postgres to be enabled after UpdatePluginEnablement")
+	}
+
+	// 2. Add a new plugin: redis -> true
+	if err := UpdatePluginEnablement(tmpFile.Name(), "redis", true); err != nil {
+		t.Fatalf("failed to update redis to true: %v", err)
+	}
+
+	cfg2, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to load updated config: %v", err)
+	}
+	if !cfg2.IsPluginEnabled("redis") {
+		t.Errorf("expected redis to be enabled after UpdatePluginEnablement")
+	}
+
+	// 3. Disable postgres again
+	if err := UpdatePluginEnablement(tmpFile.Name(), "postgres", false); err != nil {
+		t.Fatalf("failed to disable postgres: %v", err)
+	}
+
+	cfg3, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to load updated config: %v", err)
+	}
+	if cfg3.IsPluginEnabled("postgres") {
+		t.Errorf("expected postgres to be disabled after UpdatePluginEnablement(false)")
+	}
+
+	// 4. Verify comments were preserved
+	content, _ := os.ReadFile(tmpFile.Name())
+	if !strings.Contains(string(content), "# Header comment") {
+		t.Errorf("expected comments to be preserved in YAML")
+	}
+}
+
 func testingContains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && (s[:len(substr)] == substr || testingContains(s[1:], substr))))
 }
+

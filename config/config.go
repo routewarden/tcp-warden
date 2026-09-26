@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -58,9 +59,322 @@ func (d Duration) Seconds() int {
 type Config struct {
 	Version  string                   `yaml:"version"`
 	Global   GlobalConfig             `yaml:"global"`
+	Plugins  PluginsConfig            `yaml:"plugins"`
 	API      APIConfig                `yaml:"api"`
 	CrowdSec CrowdSecConfig           `yaml:"crowdsec"`
 	Services map[string]ServiceConfig `yaml:"services"`
+}
+
+// PluginsConfig manages enablement and configuration of modular plugins.
+type PluginsConfig struct {
+	Enabled  []string                     `yaml:"enabled"`
+	Disabled []string                     `yaml:"disabled"`
+	Entries  map[string]PluginStateConfig `yaml:"-"`
+}
+
+// PluginStateConfig defines enablement and options for an individual plugin.
+type PluginStateConfig struct {
+	Name    string         `yaml:"name,omitempty"`
+	Enabled *bool          `yaml:"enabled"`
+	Source  string         `yaml:"source,omitempty"`
+	Version string         `yaml:"version,omitempty"`
+	Config  map[string]any `yaml:"config,omitempty"`
+}
+
+func (p *PluginsConfig) UnmarshalYAML(value *yaml.Node) error {
+	// 1. Try simple list of strings: ["postgres", "redis"]
+	var list []string
+	if err := value.Decode(&list); err == nil {
+		p.Enabled = list
+		return nil
+	}
+
+	// 2. Try list of plugin objects: [{name: postgres, enabled: true, source: ...}]
+	var listNodes []yaml.Node
+	if err := value.Decode(&listNodes); err == nil && len(listNodes) > 0 {
+		p.Entries = make(map[string]PluginStateConfig)
+		for _, itemNode := range listNodes {
+			if itemNode.Kind == yaml.ScalarNode {
+				p.Enabled = append(p.Enabled, itemNode.Value)
+			} else if itemNode.Kind == yaml.MappingNode {
+				var itemMap map[string]any
+				if err := itemNode.Decode(&itemMap); err == nil {
+					name, _ := itemMap["name"].(string)
+					if name != "" {
+						var state PluginStateConfig
+						state.Name = name
+						if en, ok := itemMap["enabled"].(bool); ok {
+							state.Enabled = &en
+							if en {
+								p.Enabled = append(p.Enabled, name)
+							} else {
+								p.Disabled = append(p.Disabled, name)
+							}
+						}
+						if src, ok := itemMap["source"].(string); ok {
+							state.Source = src
+						} else if src, ok := itemMap["install"].(string); ok {
+							state.Source = src
+						}
+						if ver, ok := itemMap["version"].(string); ok {
+							state.Version = ver
+						}
+						p.Entries[name] = state
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	// 3. Try map format: {postgres: {enabled: true, source: ...}, mysql: ...}
+	var m map[string]any
+	if err := value.Decode(&m); err == nil {
+		p.Entries = make(map[string]PluginStateConfig)
+		for k, v := range m {
+			if strings.EqualFold(k, "enabled") {
+				if items, ok := v.([]any); ok {
+					for _, item := range items {
+						if s, ok := item.(string); ok {
+							p.Enabled = append(p.Enabled, s)
+						}
+					}
+				}
+				continue
+			}
+			if strings.EqualFold(k, "disabled") {
+				if items, ok := v.([]any); ok {
+					for _, item := range items {
+						if s, ok := item.(string); ok {
+							p.Disabled = append(p.Disabled, s)
+						}
+					}
+				}
+				continue
+			}
+
+			if sub, ok := v.(map[string]any); ok {
+				var state PluginStateConfig
+				state.Name = k
+				if en, ok := sub["enabled"].(bool); ok {
+					state.Enabled = &en
+					if en {
+						p.Enabled = append(p.Enabled, k)
+					} else {
+						p.Disabled = append(p.Disabled, k)
+					}
+				}
+				if src, ok := sub["source"].(string); ok {
+					state.Source = src
+				} else if src, ok := sub["install"].(string); ok {
+					state.Source = src
+				} else if src, ok := sub["repo"].(string); ok {
+					state.Source = src
+				}
+				if ver, ok := sub["version"].(string); ok {
+					state.Version = ver
+				}
+				if cfg, ok := sub["config"].(map[string]any); ok {
+					state.Config = cfg
+				}
+				p.Entries[k] = state
+			} else if en, ok := v.(bool); ok {
+				state := PluginStateConfig{Name: k, Enabled: &en}
+				if en {
+					p.Enabled = append(p.Enabled, k)
+				} else {
+					p.Disabled = append(p.Disabled, k)
+				}
+				p.Entries[k] = state
+			}
+		}
+		return nil
+	}
+
+	return nil
+}
+
+// UpdatePluginEnablement modifies the given YAML configuration file to set a plugin's
+// enabled state to true or false. It preserves existing comments and formatting by modifying
+// the yaml.Node abstract syntax tree directly.
+func UpdatePluginEnablement(configPath string, pluginName string, enabled bool) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("reading config file %s: %w", configPath, err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parsing YAML from %s: %w", configPath, err)
+	}
+
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return fmt.Errorf("invalid YAML document in %s", configPath)
+	}
+
+	topMap := root.Content[0]
+	if topMap.Kind != yaml.MappingNode {
+		return fmt.Errorf("expected root mapping in %s", configPath)
+	}
+
+	pluginNameLower := strings.ToLower(pluginName)
+	var pluginsValNode *yaml.Node
+
+	for i := 0; i < len(topMap.Content); i += 2 {
+		if strings.EqualFold(topMap.Content[i].Value, "plugins") {
+			pluginsValNode = topMap.Content[i+1]
+			break
+		}
+	}
+
+	boolStr := "false"
+	if enabled {
+		boolStr = "true"
+	}
+
+	if pluginsValNode == nil {
+		// Create 'plugins' section
+		keyNode := &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!str",
+			Value: "plugins",
+		}
+		newPluginsMap := &yaml.Node{
+			Kind: yaml.MappingNode,
+			Tag:  "!!map",
+		}
+		topMap.Content = append(topMap.Content, keyNode, newPluginsMap)
+		pluginsValNode = newPluginsMap
+	}
+
+	if pluginsValNode.Kind == yaml.MappingNode {
+		pluginsValNode.Style = 0 // format as block-style multiline mapping
+		var targetPluginNode *yaml.Node
+		for i := 0; i < len(pluginsValNode.Content); i += 2 {
+			if strings.EqualFold(pluginsValNode.Content[i].Value, pluginNameLower) {
+				targetPluginNode = pluginsValNode.Content[i+1]
+				break
+			}
+		}
+
+		if targetPluginNode == nil {
+			// Add new plugin entry
+			pKey := &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!str",
+				Value: pluginNameLower,
+			}
+			pMap := &yaml.Node{
+				Kind: yaml.MappingNode,
+				Tag:  "!!map",
+				Content: []*yaml.Node{
+					{
+						Kind:  yaml.ScalarNode,
+						Tag:   "!!str",
+						Value: "enabled",
+					},
+					{
+						Kind:  yaml.ScalarNode,
+						Tag:   "!!bool",
+						Value: boolStr,
+					},
+				},
+			}
+			pluginsValNode.Content = append(pluginsValNode.Content, pKey, pMap)
+		} else if targetPluginNode.Kind == yaml.MappingNode {
+			foundEnabled := false
+			for j := 0; j < len(targetPluginNode.Content); j += 2 {
+				if strings.EqualFold(targetPluginNode.Content[j].Value, "enabled") {
+					targetPluginNode.Content[j+1].Value = boolStr
+					targetPluginNode.Content[j+1].Tag = "!!bool"
+					foundEnabled = true
+					break
+				}
+			}
+			if !foundEnabled {
+				targetPluginNode.Content = append(targetPluginNode.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "enabled"},
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: boolStr},
+				)
+			}
+		} else if targetPluginNode.Kind == yaml.ScalarNode {
+			targetPluginNode.Value = boolStr
+			targetPluginNode.Tag = "!!bool"
+		}
+	} else if pluginsValNode.Kind == yaml.SequenceNode {
+		// List format
+		var newSeq []*yaml.Node
+		for _, item := range pluginsValNode.Content {
+			if item.Kind == yaml.ScalarNode {
+				if !strings.EqualFold(item.Value, pluginNameLower) {
+					newSeq = append(newSeq, item)
+				}
+			} else {
+				newSeq = append(newSeq, item)
+			}
+		}
+		if enabled {
+			newSeq = append(newSeq, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!str",
+				Value: pluginNameLower,
+			})
+		}
+		pluginsValNode.Content = newSeq
+	}
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		return fmt.Errorf("encoding updated YAML: %w", err)
+	}
+	_ = enc.Close()
+
+	if err := os.WriteFile(configPath, buf.Bytes(), 0644); err != nil {
+		return fmt.Errorf("writing updated config to %s: %w", configPath, err)
+	}
+
+	return nil
+}
+
+// IsPluginEnabled checks if a plugin is explicitly enabled.
+// Precedence:
+// 1. Runtime CLI overrides in plugins.json (enabled / disabled by user)
+// 2. YAML configuration file (plugins.disabled / plugins.enabled)
+// 3. Default: false (non-standard plugins are disabled by default)
+func (c *Config) IsPluginEnabled(pluginName string) bool {
+	nameLower := strings.ToLower(pluginName)
+
+	// Check runtime / CLI overrides (plugins.json) first
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+		for _, pd := range pDisabled {
+			if strings.EqualFold(pd, nameLower) {
+				return false
+			}
+		}
+		for _, pe := range pEnabled {
+			if strings.EqualFold(pe, nameLower) {
+				return true
+			}
+		}
+	}
+
+	// Check explicit disablement in configuration file
+	for _, disabled := range c.Plugins.Disabled {
+		if strings.EqualFold(disabled, nameLower) {
+			return false
+		}
+	}
+
+	// Check explicit enablement in configuration file
+	for _, enabled := range c.Plugins.Enabled {
+		if strings.EqualFold(enabled, nameLower) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // GlobalConfig contains daemon-wide defaults.
@@ -302,9 +616,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Global.LogLevel == "" {
 		cfg.Global.LogLevel = "info"
 	}
-	if cfg.Global.LogFile == "" {
-		cfg.Global.LogFile = "/var/log/routewarden/tcp-warden.jsonl"
-	}
+	// Note: cfg.Global.LogFile intentionally has no default — file logging is opt-in.
+	// Users who want SIEM/CrowdSec log output must set log_file explicitly in their config.
 
 	if cfg.API.Listen == "" {
 		cfg.API.Listen = "127.0.0.1:9091"
@@ -372,12 +685,18 @@ func (c *Config) Validate() error {
 			// valid standard built-in protocols
 		default:
 			// Check if supported by registered plugin
-			if p, ok := plugins.Get(svc.Protocol); ok {
-				if err := p.ValidateConfig(svc.GetPluginOptions()); err != nil {
-					return fmt.Errorf("service %q: plugin %q config error: %w", name, p.Manifest().Name, err)
-				}
-			} else {
-				return fmt.Errorf("service %q: unsupported protocol %q", name, svc.Protocol)
+			p, ok := plugins.Get(svc.Protocol)
+			if !ok {
+				return fmt.Errorf("service %q: protocol %q requires plugin %q which is not installed. Install it via 'tcp-warden plugins install https://github.com/routewarden/plugins/%s' or configure source under 'plugins.%s.source' in tcp-warden.yaml",
+					name, svc.Protocol, svc.Protocol, svc.Protocol, svc.Protocol)
+			}
+			// Non-standard plugins are disabled by default and must be explicitly enabled
+			if !c.IsPluginEnabled(p.Manifest().Name) {
+				return fmt.Errorf("service %q: protocol %q requires plugin %q which is DISABLED by default. Enable it under 'plugins.%s.enabled: true' in tcp-warden.yaml or run 'tcp-warden plugins enable %s'",
+					name, svc.Protocol, p.Manifest().Name, p.Manifest().Name, p.Manifest().Name)
+			}
+			if err := p.ValidateConfig(svc.GetPluginOptions()); err != nil {
+				return fmt.Errorf("service %q: plugin %q config error: %w", name, p.Manifest().Name, err)
 			}
 		}
 

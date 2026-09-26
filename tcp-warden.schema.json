@@ -52,6 +52,38 @@
         "fallback_action": { "type": "string", "enum": ["ban", "throttle", "bypass"], "default": "ban" }
       }
     },
+    "plugins": {
+      "type": ["object", "array"],
+      "description": "Modular protocol and stream filter plugins configuration",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "source": { "type": "string", "description": "Git repository URL or local path" },
+              "version": { "type": "string" },
+              "config": { "type": "object" }
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "enabled": { "type": "boolean", "default": true },
+              "source": { "type": "string" },
+              "version": { "type": "string" },
+              "config": { "type": "object" }
+            }
+          }
+        }
+      ]
+    },
     "services": {
       "type": "object",
       "additionalProperties": {

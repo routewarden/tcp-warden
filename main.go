@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -21,6 +23,9 @@ import (
 	_ "github.com/routewarden/tcp-warden/plugins/all"
 )
 
+//go:embed tcp-warden.yaml
+var defaultConfigFile []byte
+
 var (
 	version = "1.0.0"
 	commit  = "none"
@@ -29,7 +34,7 @@ var (
 
 func main() {
 	if len(os.Args) < 2 {
-		runDaemon("tcp-warden.yaml")
+		runDaemon("")
 		return
 	}
 
@@ -100,14 +105,56 @@ Examples:
 
 func handleRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	configPath := fs.String("config", "tcp-warden.yaml", "Path to YAML config file")
-	fs.StringVar(configPath, "c", "tcp-warden.yaml", "Path to YAML config file")
-	_ = fs.Parse(args)
+	configPath := fs.String("config", "", "Path to YAML config file")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file")
+	_ = fs.Parse(normalizeArgs(args))
 
 	runDaemon(*configPath)
 }
 
+func resolveConfigPath(customPath string) string {
+	if customPath != "" {
+		return customPath
+	}
+	if env := os.Getenv("ROUTEWARDEN_CONFIG"); env != "" {
+		return env
+	}
+	if _, err := os.Stat("tcp-warden.yaml"); err == nil {
+		return "tcp-warden.yaml"
+	}
+	if _, err := os.Stat("/etc/routewarden/tcp-warden.yaml"); err == nil {
+		return "/etc/routewarden/tcp-warden.yaml"
+	}
+	if fi, err := os.Stat("/etc/routewarden"); err == nil && fi.IsDir() {
+		return "/etc/routewarden/tcp-warden.yaml"
+	}
+	return "tcp-warden.yaml"
+}
+
+func ensureConfigFile(configPath string) error {
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Printf("ℹ️ [FIRST RUN] Configuration file not found at %s. Creating default template...\n", configPath)
+		dir := filepath.Dir(configPath)
+		if dir != "." && dir != "" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("creating directory %s: %w", dir, err)
+			}
+		}
+		if err := os.WriteFile(configPath, defaultConfigFile, 0644); err != nil {
+			return fmt.Errorf("creating default config file %s: %w", configPath, err)
+		}
+		fmt.Printf("✓ Default configuration created at %s\n", configPath)
+	}
+	return nil
+}
+
 func runDaemon(configPath string) {
+	configPath = resolveConfigPath(configPath)
+	if err := ensureConfigFile(configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed initializing configuration %s: %v\n", configPath, err)
+		os.Exit(1)
+	}
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error loading configuration %s: %v\n", configPath, err)
@@ -165,17 +212,34 @@ func handleValidate(args []string) {
 	fs.StringVar(configPath, "c", "tcp-warden.yaml", "Path to YAML config file")
 	_ = fs.Parse(args)
 
-	cfg, err := config.Load(*configPath)
+	cfgPath := resolveConfigPath(*configPath)
+	if err := ensureConfigFile(cfgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed initializing configuration %s: %v\n", cfgPath, err)
+		os.Exit(1)
+	}
+
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Validation failed: %v\n", err)
 		os.Exit(1)
 	}
 
+	var activeCount int
+	for _, svc := range cfg.Services {
+		if svc.IsEnabled() {
+			activeCount++
+		}
+	}
+
 	fmt.Printf("✓ Configuration %s is VALID.\n", *configPath)
 	fmt.Printf("  - Version: %s\n", cfg.Version)
-	fmt.Printf("  - Active services: %d\n", len(cfg.Services))
+	fmt.Printf("  - Active services: %d (Total defined: %d)\n", activeCount, len(cfg.Services))
 	for name, svc := range cfg.Services {
-		fmt.Printf("    • %s: %s -> %s [%s]\n", name, svc.Listen, svc.Upstream, svc.Protocol)
+		status := "enabled"
+		if !svc.IsEnabled() {
+			status = "disabled"
+		}
+		fmt.Printf("    • %-14s [%-11s]  %s -> %s (%s)\n", name, svc.Protocol, svc.Listen, svc.Upstream, status)
 	}
 	fmt.Printf("  - Management API: %t (%s)\n", cfg.API.Enabled, cfg.API.Listen)
 	fmt.Printf("  - CrowdSec bouncer: %t\n", cfg.CrowdSec.Enabled)
@@ -253,7 +317,7 @@ func handleBanlist(args []string) {
 func handleUnban(args []string) {
 	fs := flag.NewFlagSet("unban", flag.ExitOnError)
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
-	_ = fs.Parse(args)
+	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: tcp-warden unban <ip> [--api <url>]")
@@ -287,7 +351,7 @@ func handleBan(args []string) {
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
 	reason := fs.String("reason", "manual_admin_ban", "Reason for the ban")
 	duration := fs.String("duration", "1h", "Duration of the ban (e.g. '1h', '30m')")
-	_ = fs.Parse(args)
+	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: tcp-warden ban <ip> [--duration 1h] [--reason \"...\"] [--api <url>]")
@@ -323,6 +387,32 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-1] + "…"
 }
 
+// normalizeArgs moves leading non-flag arguments to the end so flag.FlagSet can parse
+// flags even when positional arguments precede flags (e.g. `tcp-warden ban 1.2.3.4 --duration 2h`).
+func normalizeArgs(args []string) []string {
+	var flags []string
+	var positionals []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flagName := strings.TrimLeft(arg, "-")
+				switch flagName {
+				case "force", "no-build", "v", "version", "help", "h":
+					// boolean flags, do not consume next token
+				default:
+					i++
+					flags = append(flags, args[i])
+				}
+			}
+		} else {
+			positionals = append(positionals, arg)
+		}
+	}
+	return append(flags, positionals...)
+}
+
 func handlePlugins(args []string) {
 	if len(args) == 0 {
 		printPluginsUsage()
@@ -337,6 +427,14 @@ func handlePlugins(args []string) {
 		handlePluginsList()
 	case "test":
 		handlePluginsTest(subargs)
+	case "enable":
+		handlePluginsEnable(subargs)
+	case "disable":
+		handlePluginsDisable(subargs)
+	case "install":
+		handlePluginsInstall(subargs)
+	case "uninstall", "remove":
+		handlePluginsUninstall(subargs)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown plugins subcommand: %s\n\n", subcmd)
 		printPluginsUsage()
@@ -348,37 +446,259 @@ func printPluginsUsage() {
 	fmt.Print(`RouteWarden TCP Warden - Modular Protocol Plugins
 
 Usage:
-  tcp-warden plugins [command]
+  tcp-warden plugins [command] [flags]
 
 Commands:
-  list        List all registered plugins and their self-test health status
-  test [name] Execute synthetic self-tests on registered plugins
+  list                      List all registered plugins and their enabled/health status
+  enable <name>             Enable a plugin and update config file
+  disable <name>            Disable a plugin and update config file
+  test [name]               Execute synthetic self-tests on registered plugins
+  install <url-or-path>     Install a plugin from a GitHub URL or local repository path
+  uninstall <name>          Remove an installed plugin
+
+Flags (enable / disable):
+  --config, -c  Path to YAML config file to update (default: tcp-warden.yaml)
+
+Flags (install):
+  --force       Overwrite existing plugin and cache directory
+  --no-build    Skip rebuilding tcp-warden binary after installation
+  --cache-dir   Path to plugin cache directory (default: $ROUTEWARDEN_PLUGINS_CACHE)
 
 Examples:
   tcp-warden plugins list
+  tcp-warden plugins enable postgres
+  tcp-warden plugins disable redis
+  tcp-warden plugins enable mysql --config /etc/routewarden/tcp-warden.yaml
   tcp-warden plugins test
-  tcp-warden plugins test postgres
+  tcp-warden plugins install https://github.com/routewarden/plugins/postgres
+  tcp-warden plugins install ../plugins/redis
+  tcp-warden plugins install ./my-local-plugin
+  tcp-warden plugins uninstall postgres
 `)
 }
 
-func handlePluginsList() {
-	plugins.RunSelfTests()
-	list := plugins.List()
-	fmt.Printf("%-14s %-9s %-12s %-22s %s\n", "PLUGIN", "VERSION", "STATUS", "PROTOCOLS", "DESCRIPTION")
-	fmt.Println(strings.Repeat("-", 95))
-	for _, p := range list {
-		statusStr := string(p.Status)
-		if p.Status == plugins.StatusActive {
-			statusStr = "✓ ACTIVE"
-		} else if p.Status == plugins.StatusDisabled {
-			statusStr = "✗ DISABLED"
+func handlePluginsInstall(args []string) {
+	fs := flag.NewFlagSet("plugins install", flag.ExitOnError)
+	force := fs.Bool("force", false, "Overwrite existing plugin and cache directory")
+	noBuild := fs.Bool("no-build", false, "Skip rebuilding tcp-warden binary")
+	cacheDir := fs.String("cache-dir", "", "Path to plugin cache directory")
+	_ = fs.Parse(normalizeArgs(args))
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins install <github-url-or-local-path> [--force] [--no-build] [--cache-dir <dir>]")
+		os.Exit(1)
+	}
+	source := fs.Args()[0]
+
+	fmt.Printf("📦 Installing plugin from: %s\n", source)
+	res, err := plugins.SyncPluginFromSource("", source, plugins.InstallOptions{
+		PluginsDir: "plugins",
+		ProjectDir: ".",
+		CacheDir:   *cacheDir,
+		Force:      *force,
+		NoBuild:    *noBuild,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Plugin installation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	if res.TestPassed {
+		fmt.Printf("✓ Plugin %q [%s] installed successfully!\n", res.Name, res.Version)
+		fmt.Printf("  • Status:     %s\n", res.Status)
+		fmt.Printf("  • Protocols:  %s\n", strings.Join(res.Protocols, ", "))
+		fmt.Printf("  • Pre-Tests:  PASSED\n")
+		if res.Rebuilt {
+			fmt.Printf("  • Binary:     rebuilt successfully with new plugin\n")
 		}
-		fmt.Printf("%-14s %-9s %-12s %-22s %s\n",
+	} else {
+		fmt.Printf("⚠️ Plugin %q [%s] was installed but DISABLED due to test failure:\n", res.Name, res.Version)
+		fmt.Printf("  • Status:     DISABLED\n")
+		fmt.Printf("  • Pre-Tests:  FAILED\n")
+		if res.TestOutput != "" {
+			fmt.Println("--- Test Output ---")
+			fmt.Println(res.TestOutput)
+			fmt.Println("-------------------")
+		}
+	}
+}
+
+func handlePluginsUninstall(args []string) {
+	fs := flag.NewFlagSet("plugins uninstall", flag.ExitOnError)
+	noBuild := fs.Bool("no-build", false, "Skip rebuilding tcp-warden binary")
+	_ = fs.Parse(normalizeArgs(args))
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins uninstall <plugin-name> [--no-build]")
+		os.Exit(1)
+	}
+	name := fs.Args()[0]
+
+	fmt.Printf("🗑️  Uninstalling plugin: %s\n", name)
+	if err := plugins.UninstallPlugin(name, plugins.InstallOptions{
+		PluginsDir: "plugins",
+		ProjectDir: ".",
+		NoBuild:    *noBuild,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed uninstalling plugin: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Also ensure configuration disables the uninstalled plugin
+	cfgPath := resolveConfigPath("")
+	if _, err := os.Stat(cfgPath); err == nil {
+		_ = config.UpdatePluginEnablement(cfgPath, name, false)
+	}
+
+	fmt.Printf("✓ Plugin %q uninstalled successfully.\n", name)
+}
+
+func handlePluginsEnable(args []string) {
+	fs := flag.NewFlagSet("plugins enable", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to YAML config file")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file")
+	_ = fs.Parse(normalizeArgs(args))
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins enable <plugin-name> [--config <path>]")
+		os.Exit(1)
+	}
+	name := strings.ToLower(strings.TrimSpace(fs.Args()[0]))
+
+	fmt.Printf("🧪 Running pre-flight self-test for plugin %q...\n", name)
+	if err := plugins.Global().Enable(name); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to enable plugin %q: %v\n", name, err)
+		os.Exit(1)
+	}
+
+	_ = plugins.SavePluginEnablement(".", name, true)
+	fmt.Printf("✓ Plugin %q is now ENABLED and ACTIVE.\n", name)
+
+	cfgPath := resolveConfigPath(*configPath)
+	if _, err := os.Stat(cfgPath); err == nil {
+		if err := config.UpdatePluginEnablement(cfgPath, name, true); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
+		} else {
+			fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: true)\n", cfgPath, name)
+		}
+	}
+}
+
+func handlePluginsDisable(args []string) {
+	fs := flag.NewFlagSet("plugins disable", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to YAML config file")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file")
+	_ = fs.Parse(normalizeArgs(args))
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins disable <plugin-name> [--config <path>]")
+		os.Exit(1)
+	}
+	name := strings.ToLower(strings.TrimSpace(fs.Args()[0]))
+
+	if err := plugins.Global().Disable(name, "disabled by user"); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to disable plugin %q: %v\n", name, err)
+		os.Exit(1)
+	}
+
+	_ = plugins.SavePluginEnablement(".", name, false)
+	fmt.Printf("✓ Plugin %q is now DISABLED.\n", name)
+
+	cfgPath := resolveConfigPath(*configPath)
+	if _, err := os.Stat(cfgPath); err == nil {
+		if err := config.UpdatePluginEnablement(cfgPath, name, false); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
+		} else {
+			fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: false)\n", cfgPath, name)
+		}
+	}
+}
+
+func handlePluginsList() {
+	var enabledList []string
+	var disabledList []string
+
+	cfgPath := resolveConfigPath("")
+
+	var cfg *config.Config
+	// 1. Sync base enablement from configuration if file exists
+	if loadedCfg, err := config.Load(cfgPath); err == nil {
+		cfg = loadedCfg
+		enabledList = append(enabledList, cfg.Plugins.Enabled...)
+		disabledList = append(disabledList, cfg.Plugins.Disabled...)
+	}
+
+	// 2. Sync runtime overrides from plugins.json if present (only for plugins not explicitly defined in YAML)
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+		for _, pe := range pEnabled {
+			if cfg == nil || !isPluginInEntries(cfg, pe) {
+				disabledList = removeFromList(disabledList, pe)
+				if !contains(enabledList, pe) {
+					enabledList = append(enabledList, pe)
+				}
+			}
+		}
+		for _, pd := range pDisabled {
+			if cfg == nil || !isPluginInEntries(cfg, pd) {
+				enabledList = removeFromList(enabledList, pd)
+				if !contains(disabledList, pd) {
+					disabledList = append(disabledList, pd)
+				}
+			}
+		}
+	}
+
+	plugins.ApplyConfiguration(enabledList, disabledList)
+
+	list := plugins.List()
+	if len(list) == 0 {
+		fmt.Println("No modular plugins currently installed.")
+		fmt.Println()
+		fmt.Println("To install a plugin from a Git repository or local directory, run:")
+		fmt.Println("  tcp-warden plugins install <github-url-or-local-path>")
+		fmt.Println()
+		fmt.Println("Available plugins in routewarden/plugins repository:")
+		fmt.Println("  • postgres:     tcp-warden plugins install https://github.com/routewarden/plugins/postgres")
+		fmt.Println("  • mysql:        tcp-warden plugins install https://github.com/routewarden/plugins/mysql")
+		fmt.Println("  • redis:        tcp-warden plugins install https://github.com/routewarden/plugins/redis")
+		fmt.Println("  • mongodb:      tcp-warden plugins install https://github.com/routewarden/plugins/mongodb")
+		fmt.Println("  • memcached:    tcp-warden plugins install https://github.com/routewarden/plugins/memcached")
+		fmt.Println("  • amqp:         tcp-warden plugins install https://github.com/routewarden/plugins/amqp")
+		fmt.Println("  • http:         tcp-warden plugins install https://github.com/routewarden/plugins/http")
+		fmt.Println("  • ldap:         tcp-warden plugins install https://github.com/routewarden/plugins/ldap")
+		fmt.Println("  • vnc:          tcp-warden plugins install https://github.com/routewarden/plugins/vnc")
+		fmt.Println("  • ftp:          tcp-warden plugins install https://github.com/routewarden/plugins/ftp")
+		fmt.Println("  • tls-sni:      tcp-warden plugins install https://github.com/routewarden/plugins/tls_sni")
+		fmt.Println("  • mqtt:         tcp-warden plugins install https://github.com/routewarden/plugins/mqtt")
+		fmt.Println("  • minecraft:    tcp-warden plugins install https://github.com/routewarden/plugins/minecraft")
+		fmt.Println("  • echo-filter:  tcp-warden plugins install https://github.com/routewarden/plugins/echo_filter")
+		return
+	}
+
+	fmt.Printf("%-14s %-9s %-14s %-22s %s\n", "PLUGIN", "VERSION", "STATUS", "PROTOCOLS", "DESCRIPTION")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, p := range list {
+		statusStr := "DISABLED"
+		if p.Enabled && p.Status == plugins.StatusActive {
+			statusStr = "✓ ACTIVE"
+		} else if p.TestError != "" {
+			statusStr = "✗ FAILED"
+		} else if !p.Enabled {
+			statusStr = "DISABLED"
+		}
+
+		desc := p.Description
+		if !p.Enabled {
+			desc += " (disabled by default)"
+		}
+
+		fmt.Printf("%-14s %-9s %-14s %-22s %s\n",
 			p.Name,
 			p.Version,
 			statusStr,
 			strings.Join(p.Protocols, ", "),
-			truncate(p.Description, 36),
+			truncate(desc, 38),
 		)
 	}
 }
@@ -434,3 +754,31 @@ func handlePluginsTest(args []string) {
 		fmt.Printf("✓ Results: %d/%d passed. All registered plugins healthy and active.\n", passedCount, passedCount)
 	}
 }
+
+func contains(list []string, item string) bool {
+	for _, s := range list {
+		if strings.EqualFold(s, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeFromList(list []string, item string) []string {
+	var res []string
+	for _, s := range list {
+		if !strings.EqualFold(s, item) {
+			res = append(res, s)
+		}
+	}
+	return res
+}
+
+func isPluginInEntries(cfg *config.Config, name string) bool {
+	if cfg == nil || cfg.Plugins.Entries == nil {
+		return false
+	}
+	_, ok := cfg.Plugins.Entries[strings.ToLower(name)]
+	return ok
+}
+

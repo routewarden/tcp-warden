@@ -3,7 +3,6 @@
 # Schema: https://routewarden.github.io/tcp-warden/tcp-warden.schema.json
 
 version: "1.0"
-
 # Global daemon policy defaults
 global:
   max_connections: 10000
@@ -19,24 +18,33 @@ global:
   geo_block:
     deny_countries: []
     allow_countries: []
-
 # Management & metrics API (REST + Server-Sent Events)
 api:
   enabled: true
   listen: "127.0.0.1:9091"
   auth_token: ""
-
 # CrowdSec LAPI Bouncer integration
 crowdsec:
   enabled: false
   lapi_url: "http://127.0.0.1:8080"
   api_key: "${CROWDSEC_API_KEY}"
   update_frequency: "10s"
-  fallback_action: "ban"
-
+# Modular Protocol Plugins
+# Non-standard protocol plugins live in https://github.com/routewarden/plugins
+# Install them via CLI:
+#   tcp-warden plugins install https://github.com/routewarden/plugins/postgres
+# Or declare them below to automatically pull, cache, and activate on boot:
+# plugins:
+#   postgres:
+#     enabled: true
+#     source: "https://github.com/routewarden/plugins/postgres"
+#   redis:
+#     enabled: true
+#     source: "https://github.com/routewarden/plugins/redis"
+plugins: {}
 # Service definitions
 services:
-  # SSH Service Guard
+  # SSH Service Guard (Standard Protocol - Enabled)
   ssh:
     listen: ":2222"
     upstream: "127.0.0.1:22"
@@ -67,8 +75,7 @@ services:
     ssh:
       banner: "RouteWarden SSH Guard"
       max_auth_tries: 3
-
-  # SMTP Mail Transfer Guard
+  # SMTP Mail Transfer Guard (Standard Protocol - Enabled)
   smtp:
     listen: ":2525"
     upstream: "127.0.0.1:25"
@@ -85,8 +92,7 @@ services:
         - "*.tempmail.com"
         - "spam.org"
       require_starttls: false
-
-  # POP3 Mail Retrieval Guard
+  # POP3 Mail Retrieval Guard (Standard Protocol - Enabled)
   pop3:
     listen: ":1110"
     upstream: "127.0.0.1:110"
@@ -96,8 +102,7 @@ services:
       burst: 5
     max_auth_failures: 3
     ban_after_failures: 3
-
-  # IMAP Mail Retrieval Guard
+  # IMAP Mail Retrieval Guard (Standard Protocol - Enabled)
   imap:
     listen: ":1143"
     upstream: "127.0.0.1:143"
@@ -107,60 +112,7 @@ services:
       burst: 5
     max_auth_failures: 3
     ban_after_failures: 3
-
-  # PostgreSQL Database Guard
-  postgres:
-    listen: ":5433"
-    upstream: "127.0.0.1:5432"
-    protocol: "postgres"
-    max_auth_failures: 3
-    ban_after_failures: 3
-    ban_duration: "1h"
-
-  # MySQL Database Guard
-  mysql:
-    listen: ":3307"
-    upstream: "127.0.0.1:3306"
-    protocol: "mysql"
-    max_auth_failures: 3
-    ban_after_failures: 3
-    ban_duration: "1h"
-
-  # Redis Cache Guard with Command Filtering
-  redis:
-    listen: ":6380"
-    upstream: "127.0.0.1:6379"
-    protocol: "redis"
-    max_auth_failures: 5
-    ban_after_failures: 5
-    redis:
-      blocked_commands:
-        - "FLUSHALL"
-        - "FLUSHDB"
-        - "CONFIG"
-        - "SHUTDOWN"
-
-  # FTP File Transfer Guard
-  ftp:
-    listen: ":2121"
-    upstream: "127.0.0.1:21"
-    protocol: "ftp"
-    max_auth_failures: 3
-    ban_after_failures: 3
-
-  # TLS SNI Domain Filter / Passthrough Guard
-  tls-proxy:
-    listen: ":8443"
-    upstream: "127.0.0.1:443"
-    protocol: "tls"
-    tls:
-      allowed_domains:
-        - "*.example.com"
-        - "app.internal"
-      blocked_domains:
-        - "*.phishing.com"
-
-  # Generic TCP Tunnel
+  # Generic TCP Tunnel (Standard Protocol - Enabled)
   database:
     listen: ":15432"
     upstream: "127.0.0.1:5432"
@@ -173,27 +125,55 @@ services:
         - "10.0.0.0/8"
         - "127.0.0.1"
 
-  # Custom Plugin Example: Content / Exploit Signature Filter
-  text-filter:
-    enabled: false
-    listen: ":9000"
-    upstream: "127.0.0.1:9001"
-    protocol: "echo_filter"
-    plugin_config:
-      banned_keywords:
-        - "EXPLOIT"
-        - "DROP TABLE"
-        - "MALWARE"
-
-  # Custom Plugin Example: IoT MQTT Broker Guard
-  mqtt-broker:
-    enabled: false
-    listen: ":1883"
-    upstream: "127.0.0.1:18883"
-    protocol: "mqtt"
-    plugin_config:
-      blocked_client_id_prefixes:
-        - "bot-"
-        - "scanner-"
-        - "shodan"
-      max_client_id_len: 64
+# Optional Plugin Service Examples (Install plugin first before enabling):
+#
+# PostgreSQL Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/postgres)
+# postgres:
+#   listen: ":5433"
+#   upstream: "127.0.0.1:5432"
+#   protocol: "postgres"
+#   max_auth_failures: 3
+#   ban_after_failures: 3
+#   ban_duration: "1h"
+#
+# MySQL Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/mysql)
+# mysql:
+#   listen: ":3307"
+#   upstream: "127.0.0.1:3306"
+#   protocol: "mysql"
+#   max_auth_failures: 3
+#   ban_after_failures: 3
+#
+# Redis Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/redis)
+# redis:
+#   listen: ":6380"
+#   upstream: "127.0.0.1:6379"
+#   protocol: "redis"
+#   max_auth_failures: 5
+#   ban_after_failures: 5
+#   plugin_config:
+#     blocked_commands:
+#       - "FLUSHALL"
+#       - "FLUSHDB"
+#       - "CONFIG"
+#       - "SHUTDOWN"
+#
+# FTP Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/ftp)
+# ftp:
+#   listen: ":2121"
+#   upstream: "127.0.0.1:21"
+#   protocol: "ftp"
+#   max_auth_failures: 3
+#   ban_after_failures: 3
+#
+# TLS SNI Passthrough Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/tls_sni)
+# tls-proxy:
+#   listen: ":8443"
+#   upstream: "127.0.0.1:443"
+#   protocol: "tls"
+#   plugin_config:
+#     allowed_domains:
+#       - "*.example.com"
+#       - "app.internal"
+#     blocked_domains:
+#       - "*.phishing.com"

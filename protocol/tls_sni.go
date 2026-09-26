@@ -65,6 +65,10 @@ func (p *TLSSNIProxy) Run() (ProxyResult, bool, string) {
 	}
 
 	// Domain Filtering
+	if len(p.opts.AllowedDomains) > 0 && sni == "" {
+		return ProxyResult{}, true, "missing SNI in TLS ClientHello while domain allowlist is enforced"
+	}
+
 	if sni != "" {
 		sniLower := strings.ToLower(sni)
 

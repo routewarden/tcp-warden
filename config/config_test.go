@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -184,7 +185,7 @@ services:
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 			}
-			if err != nil && !testingContains(err.Error(), tt.wantErr) {
+			if !testingContains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
 		})
@@ -294,5 +295,149 @@ services:
 
 func testingContains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && (s[:len(substr)] == substr || testingContains(s[1:], substr))))
+}
+
+func TestPortRangeParsing(t *testing.T) {
+	tests := []struct {
+		addr      string
+		wantHost  string
+		wantStart int
+		wantEnd   int
+		wantErr   bool
+	}{
+		{addr: ":8080", wantHost: "", wantStart: 8080, wantEnd: 8080},
+		{addr: "8080", wantHost: "", wantStart: 8080, wantEnd: 8080},
+		{addr: ":8000-8005", wantHost: "", wantStart: 8000, wantEnd: 8005},
+		{addr: "127.0.0.1:8080", wantHost: "127.0.0.1", wantStart: 8080, wantEnd: 8080},
+		{addr: "127.0.0.1:8000-8005", wantHost: "127.0.0.1", wantStart: 8000, wantEnd: 8005},
+		{addr: "[::1]:8000-8005", wantHost: "::1", wantStart: 8000, wantEnd: 8005},
+		{addr: "", wantErr: true},
+		{addr: ":abc", wantErr: true},
+		{addr: ":8005-8000", wantErr: true},
+		{addr: ":0", wantErr: true},
+		{addr: ":70000", wantErr: true},
+		{addr: ":1-2000", wantErr: true}, // exceeds 1000 max span
+	}
+
+	for _, tt := range tests {
+		h, start, end, err := ParsePortRange(tt.addr)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("ParsePortRange(%q) expected error, got nil", tt.addr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParsePortRange(%q) unexpected error: %v", tt.addr, err)
+			continue
+		}
+		if h != tt.wantHost || start != tt.wantStart || end != tt.wantEnd {
+			t.Errorf("ParsePortRange(%q) = (%q, %d, %d), want (%q, %d, %d)", tt.addr, h, start, end, tt.wantHost, tt.wantStart, tt.wantEnd)
+		}
+	}
+}
+
+func TestResolveUpstream(t *testing.T) {
+	// 1:1 range
+	svc1 := ServiceConfig{
+		Listen:   ":8000-8003",
+		Upstream: "10.0.0.1:9000-9003",
+	}
+
+	target, err := svc1.ResolveUpstream(&net.TCPAddr{Port: 8002})
+	if err != nil || target != "10.0.0.1:9002" {
+		t.Errorf("ResolveUpstream 1:1 port 8002 = %q, err=%v, want 10.0.0.1:9002", target, err)
+	}
+
+	// Many-to-one
+	svc2 := ServiceConfig{
+		Listen:   ":8000-8005",
+		Upstream: "10.0.0.1:8080",
+	}
+	target2, err := svc2.ResolveUpstream(&net.TCPAddr{Port: 8004})
+	if err != nil || target2 != "10.0.0.1:8080" {
+		t.Errorf("ResolveUpstream many-to-one port 8004 = %q, err=%v, want 10.0.0.1:8080", target2, err)
+	}
+}
+
+func TestPortRangeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "valid 1:1 port range",
+			yaml: `
+services:
+  http_range:
+    listen: ":8000-8002"
+    upstream: "127.0.0.1:9000-9002"
+    protocol: "tcp"
+`,
+		},
+		{
+			name: "valid many-to-one port range",
+			yaml: `
+services:
+  http_many:
+    listen: ":8000-8005"
+    upstream: "127.0.0.1:8080"
+    protocol: "tcp"
+`,
+		},
+		{
+			name: "single listen to range upstream error",
+			yaml: `
+services:
+  invalid:
+    listen: ":8080"
+    upstream: "127.0.0.1:9000-9005"
+    protocol: "tcp"
+`,
+			wantErr: "single listen port cannot map to an upstream port range",
+		},
+		{
+			name: "mismatched range sizes error",
+			yaml: `
+services:
+  mismatch:
+    listen: ":8000-8005"
+    upstream: "127.0.0.1:9000-9002"
+    protocol: "tcp"
+`,
+			wantErr: "upstream port range size (3) must match listen port range size (6)",
+		},
+		{
+			name: "overlapping port ranges error",
+			yaml: `
+services:
+  svc1:
+    listen: ":8000-8005"
+    upstream: "127.0.0.1:8080"
+    protocol: "tcp"
+  svc2:
+    listen: ":8003-8008"
+    upstream: "127.0.0.1:8080"
+    protocol: "tcp"
+`,
+			wantErr: "duplicate listen address",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+				}
+			}
+		})
+	}
 }
 

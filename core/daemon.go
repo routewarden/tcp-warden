@@ -30,7 +30,7 @@ type Daemon struct {
 	pipeline  *Pipeline
 	apiServer *APIServer
 
-	listeners map[string]net.Listener
+	listeners []net.Listener
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 }
@@ -147,7 +147,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 		crowdsec:  cs,
 		pipeline:  pipe,
 		apiServer: apiSrv,
-		listeners: make(map[string]net.Listener),
+		listeners: make([]net.Listener, 0),
 	}, nil
 }
 
@@ -169,24 +169,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 
-	// 3. Start listeners for all enabled services
+	// 3. Start listeners for all enabled services (including port ranges)
 	for name, svc := range d.cfg.Services {
 		if !svc.IsEnabled() {
 			continue
 		}
 
-		ln, err := net.Listen("tcp", svc.Listen)
+		lHost, ports, err := svc.ListenPorts()
 		if err != nil {
 			d.Stop()
-			return fmt.Errorf("starting listener for service %q on %s: %w", name, svc.Listen, err)
+			return fmt.Errorf("parsing listen address for service %q (%s): %w", name, svc.Listen, err)
 		}
 
-		d.mu.Lock()
-		d.listeners[name] = ln
-		d.mu.Unlock()
+		for _, port := range ports {
+			listenAddr := config.FormatHostPort(lHost, port)
+			ln, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				d.Stop()
+				return fmt.Errorf("starting listener for service %q on %s: %w", name, listenAddr, err)
+			}
 
-		d.wg.Add(1)
-		go d.serveService(ctx, ln, svc)
+			d.mu.Lock()
+			d.listeners = append(d.listeners, ln)
+			d.mu.Unlock()
+
+			d.wg.Add(1)
+			go d.serveService(ctx, ln, svc)
+		}
 	}
 
 	// Wait for context cancellation
@@ -230,7 +239,7 @@ func (d *Daemon) Stop() {
 	for _, ln := range d.listeners {
 		ln.Close()
 	}
-	d.listeners = make(map[string]net.Listener)
+	d.listeners = nil
 
 	if d.apiServer != nil {
 		d.apiServer.Close()

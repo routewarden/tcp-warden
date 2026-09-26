@@ -91,8 +91,8 @@
         "required": ["listen", "upstream"],
         "properties": {
           "enabled": { "type": "boolean", "default": true },
-          "listen": { "type": "string" },
-          "upstream": { "type": "string" },
+          "listen": { "type": "string", "description": "Listen address and port, e.g. ':8080', '127.0.0.1:8080', or port range ':8000-8005'" },
+          "upstream": { "type": "string", "description": "Upstream target address and port, e.g. '127.0.0.1:8080', 1:1 range '10.0.0.1:8000-8005', or single port for many-to-one" },
           "protocol": { "type": "string" },
           "plugin_config": { "type": "object", "description": "Arbitrary options passed directly to modular plugins" },
           "max_auth_failures": { "type": "integer", "minimum": 0 },

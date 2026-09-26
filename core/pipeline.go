@@ -124,7 +124,11 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 		}
 	}
 
-	upstream, err := protocol.DialUpstream(svc.Upstream)
+	targetUpstream, err := svc.ResolveUpstream(conn.LocalAddr())
+	if err != nil {
+		targetUpstream = svc.Upstream
+	}
+	upstream, err := protocol.DialUpstream(targetUpstream)
 	if err != nil {
 		st.AddBlocked()
 		p.emitEvent(svc, clientIP, geo, "blocked", "upstream_connect_failed", 0, 0, start)

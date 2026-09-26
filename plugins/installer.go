@@ -145,13 +145,9 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	pluginStatus := StatusActive
 	testErrStr := ""
 
-	if !testPassed {
+	if testErr != nil {
 		pluginStatus = StatusDisabled
-		if testErr != nil {
-			testErrStr = fmt.Sprintf("tests failed: %v", testErr)
-		} else {
-			testErrStr = "tests failed"
-		}
+		testErrStr = fmt.Sprintf("tests failed: %v", testErr)
 	}
 
 	// 4. Update plugins/all/all.go to include new plugin import

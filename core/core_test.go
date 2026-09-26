@@ -5,16 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
 	"github.com/routewarden/tcp-warden/plugins"
 	"github.com/routewarden/tcp-warden/plugins/sdk"
+	"github.com/routewarden/tcp-warden/protocol"
 )
 
 func TestPipelineIPFilterAndBanlist(t *testing.T) {
@@ -300,6 +304,233 @@ func TestPipeline_GlobalGeoBlockAllowCountries(t *testing.T) {
 	// "US" is in US/CA -> should be allowed
 	if pipe.isCountryBlocked("US", &svc) {
 		t.Errorf("expected US to be allowed by global allowlist")
+	}
+}
+
+type mockHTTPPlugin struct {
+	inspectedCount atomic.Int32
+}
+
+func (m *mockHTTPPlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{
+		Name:      "http",
+		Version:   "1.0.0",
+		Protocols: []string{"http"},
+	}
+}
+
+func (m *mockHTTPPlugin) ValidateConfig(map[string]any) error { return nil }
+func (m *mockHTTPPlugin) CreateInspector(map[string]any) (sdk.Inspector, error) {
+	return &mockHTTPInspector{plugin: m}, nil
+}
+func (m *mockHTTPPlugin) SelfTest() error { return nil }
+
+type mockHTTPInspector struct {
+	plugin *mockHTTPPlugin
+}
+
+func (i *mockHTTPInspector) Run(ctx sdk.Context, client, upstream net.Conn) (sdk.ProxyResult, bool, string, error) {
+	i.plugin.inspectedCount.Add(1)
+	res := protocol.Proxy(client, upstream)
+	return sdk.ProxyResult{BytesIn: res.BytesIn, BytesOut: res.BytesOut}, false, "", nil
+}
+
+func findTwoPortPairs(t *testing.T) (l1, l2, u1, u2 int) {
+	t.Helper()
+	for port := 31000; port < 45000; port += 4 {
+		lA, errA := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if errA != nil {
+			continue
+		}
+		lB, errB := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port+1))
+		if errB != nil {
+			lA.Close()
+			continue
+		}
+		lC, errC := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port+2))
+		if errC != nil {
+			lA.Close()
+			lB.Close()
+			continue
+		}
+		lD, errD := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port+3))
+		if errD != nil {
+			lA.Close()
+			lB.Close()
+			lC.Close()
+			continue
+		}
+		lA.Close()
+		lB.Close()
+		lC.Close()
+		lD.Close()
+		return port, port + 1, port + 2, port + 3
+	}
+	t.Fatal("could not find free port pairs")
+	return 0, 0, 0, 0
+}
+
+func TestDaemon_HTTPPortRange_1to1(t *testing.T) {
+	mockPlugin := &mockHTTPPlugin{}
+	plugins.Register(mockPlugin)
+
+	l1, l2, u1, u2 := findTwoPortPairs(t)
+
+	// Upstream 1
+	srv1 := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("response-from-upstream-1"))
+	})}
+	lnU1, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", u1))
+	if err != nil {
+		t.Fatalf("failed to listen on upstream 1: %v", err)
+	}
+	go srv1.Serve(lnU1)
+	defer srv1.Close()
+
+	// Upstream 2
+	srv2 := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("response-from-upstream-2"))
+	})}
+	lnU2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", u2))
+	if err != nil {
+		t.Fatalf("failed to listen on upstream 2: %v", err)
+	}
+	go srv2.Serve(lnU2)
+	defer srv2.Close()
+
+	cfg := &config.Config{
+		Version: "1.0",
+		Plugins: config.PluginsConfig{
+			Enabled: []string{"http"},
+		},
+		Services: map[string]config.ServiceConfig{
+			"http-1to1": {
+				Name:     "http-1to1",
+				Listen:   fmt.Sprintf("127.0.0.1:%d-%d", l1, l2),
+				Upstream: fmt.Sprintf("127.0.0.1:%d-%d", u1, u2),
+				Protocol: "http",
+			},
+		},
+	}
+
+	d, err := NewDaemon(cfg)
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("daemon Run exited prematurely: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// 1. Query Port 1 -> Should map to Upstream 1
+	resp1, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", l1))
+	if err != nil {
+		t.Fatalf("failed request to port %d: %v", l1, err)
+	}
+	defer resp1.Body.Close()
+	body1, _ := io.ReadAll(resp1.Body)
+	if string(body1) != "response-from-upstream-1" {
+		t.Errorf("port %d expected response from upstream 1, got %q", l1, string(body1))
+	}
+
+	// 2. Query Port 2 -> Should map to Upstream 2
+	resp2, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", l2))
+	if err != nil {
+		t.Fatalf("failed request to port %d: %v", l2, err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if string(body2) != "response-from-upstream-2" {
+		t.Errorf("port %d expected response from upstream 2, got %q", l2, string(body2))
+	}
+
+	if mockPlugin.inspectedCount.Load() < 2 {
+		t.Errorf("expected at least 2 inspections by http plugin, got %d", mockPlugin.inspectedCount.Load())
+	}
+}
+
+func TestDaemon_HTTPPortRange_ManyToOne(t *testing.T) {
+	l1, l2, u1, _ := findTwoPortPairs(t)
+
+	// Single Upstream Server
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("response-from-single-target"))
+	})}
+	lnU, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", u1))
+	if err != nil {
+		t.Fatalf("failed to listen on single upstream: %v", err)
+	}
+	go srv.Serve(lnU)
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Version: "1.0",
+		Plugins: config.PluginsConfig{
+			Enabled: []string{"http"},
+		},
+		Services: map[string]config.ServiceConfig{
+			"http-many-to-one": {
+				Name:     "http-many-to-one",
+				Listen:   fmt.Sprintf("127.0.0.1:%d-%d", l1, l2),
+				Upstream: fmt.Sprintf("127.0.0.1:%d", u1),
+				Protocol: "http",
+			},
+		},
+	}
+
+	d, err := NewDaemon(cfg)
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("daemon Run exited prematurely: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// 1. Query Port 1 -> Should map to Single Upstream
+	resp1, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", l1))
+	if err != nil {
+		t.Fatalf("failed request to port %d: %v", l1, err)
+	}
+	defer resp1.Body.Close()
+	body1, _ := io.ReadAll(resp1.Body)
+	if string(body1) != "response-from-single-target" {
+		t.Errorf("port %d expected response from single upstream, got %q", l1, string(body1))
+	}
+
+	// 2. Query Port 2 -> Should also map to Single Upstream
+	resp2, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", l2))
+	if err != nil {
+		t.Fatalf("failed request to port %d: %v", l2, err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if string(body2) != "response-from-single-target" {
+		t.Errorf("port %d expected response from single upstream, got %q", l2, string(body2))
 	}
 }
 

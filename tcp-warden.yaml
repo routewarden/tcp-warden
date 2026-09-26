@@ -177,3 +177,16 @@ services:
 #       - "app.internal"
 #     blocked_domains:
 #       - "*.phishing.com"
+#
+# HTTP Port Range (Many-to-One: entire port range proxies to a single backend ingress)
+# http-ingress-pool:
+#   listen: ":8080-8085"
+#   upstream: "127.0.0.1:80"
+#   protocol: "http"
+#
+# HTTP Port Range (1:1 Port Mapping: port offset is preserved to backend instances)
+# http-shards:
+#   listen: ":9000-9003"
+#   upstream: "10.0.0.1:9000-9003"
+#   protocol: "http"
+

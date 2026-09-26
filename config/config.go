@@ -558,6 +558,144 @@ func (s *ServiceConfig) IsEnabled() bool {
 	return *s.Enabled
 }
 
+// ParsePortRange parses addresses with single ports or port ranges.
+// Supported formats:
+//   ":8080"               -> host: "", start: 8080, end: 8080
+//   ":8000-8005"          -> host: "", start: 8000, end: 8005
+//   "127.0.0.1:8080"      -> host: "127.0.0.1", start: 8080, end: 8080
+//   "127.0.0.1:8000-8005" -> host: "127.0.0.1", start: 8000, end: 8005
+//   "[::1]:8000-8005"     -> host: "::1", start: 8000, end: 8005
+//   "8080"                -> host: "", start: 8080, end: 8080
+//   "8000-8005"           -> host: "", start: 8000, end: 8005
+func ParsePortRange(addr string) (host string, startPort, endPort int, err error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", 0, 0, fmt.Errorf("empty address")
+	}
+
+	lastColon := strings.LastIndex(addr, ":")
+	if lastColon == -1 {
+		// Port or port range without host (e.g. "8080" or "8000-8005")
+		start, end, err := parseRange(addr)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		return "", start, end, nil
+	}
+
+	host = addr[:lastColon]
+	portPart := addr[lastColon+1:]
+
+	// Strip IPv6 brackets if present
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+
+	start, end, err := parseRange(portPart)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return host, start, end, nil
+}
+
+func parseRange(portPart string) (int, int, error) {
+	portPart = strings.TrimSpace(portPart)
+	if idx := strings.Index(portPart, "-"); idx != -1 {
+		startStr := strings.TrimSpace(portPart[:idx])
+		endStr := strings.TrimSpace(portPart[idx+1:])
+		start, err := strconv.Atoi(startStr)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid start port %q: %w", startStr, err)
+		}
+		end, err := strconv.Atoi(endStr)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid end port %q: %w", endStr, err)
+		}
+		if start < 1 || start > 65535 {
+			return 0, 0, fmt.Errorf("start port %d out of valid range (1-65535)", start)
+		}
+		if end < 1 || end > 65535 {
+			return 0, 0, fmt.Errorf("end port %d out of valid range (1-65535)", end)
+		}
+		if start > end {
+			return 0, 0, fmt.Errorf("start port %d must be <= end port %d", start, end)
+		}
+		if end-start > 1000 {
+			return 0, 0, fmt.Errorf("port range (%d-%d) exceeds maximum allowed range of 1000 ports", start, end)
+		}
+		return start, end, nil
+	}
+
+	port, err := strconv.Atoi(portPart)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port %q: %w", portPart, err)
+	}
+	if port < 1 || port > 65535 {
+		return 0, 0, fmt.Errorf("port %d out of valid range (1-65535)", port)
+	}
+	return port, port, nil
+}
+
+// FormatHostPort formats host and port into host:port or [ipv6]:port.
+func FormatHostPort(host string, port int) string {
+	if host != "" && strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return fmt.Sprintf("[%s]:%d", host, port)
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
+// ListenPorts returns the host and individual port numbers for this service listener.
+func (s *ServiceConfig) ListenPorts() (host string, ports []int, err error) {
+	h, start, end, err := ParsePortRange(s.Listen)
+	if err != nil {
+		return "", nil, err
+	}
+	ports = make([]int, 0, end-start+1)
+	for p := start; p <= end; p++ {
+		ports = append(ports, p)
+	}
+	return h, ports, nil
+}
+
+// ResolveUpstream calculates the target upstream address (host:port) for an incoming connection.
+// For many-to-one mapping (e.g. listen: ":8000-8005", upstream: "127.0.0.1:8080"), it routes all connections to the single upstream port.
+// For 1:1 port range mapping (e.g. listen: ":8000-8005", upstream: "10.0.0.1:9000-9005"), it offsets the incoming port:
+//   upstreamPort = uStart + (clientLocalPort - lStart).
+func (s *ServiceConfig) ResolveUpstream(localAddr net.Addr) (string, error) {
+	_, lStart, lEnd, err := ParsePortRange(s.Listen)
+	if err != nil {
+		return s.Upstream, err
+	}
+	uHost, uStart, uEnd, err := ParsePortRange(s.Upstream)
+	if err != nil {
+		return s.Upstream, err
+	}
+
+	// Many-to-one (single upstream target)
+	if uStart == uEnd {
+		return FormatHostPort(uHost, uStart), nil
+	}
+
+	// 1:1 range mapping
+	localPort := 0
+	if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
+		localPort = tcpAddr.Port
+	} else if localAddr != nil {
+		_, pStr, err := net.SplitHostPort(localAddr.String())
+		if err == nil {
+			localPort, _ = strconv.Atoi(pStr)
+		}
+	}
+
+	if localPort < lStart || localPort > lEnd {
+		return FormatHostPort(uHost, uStart), nil
+	}
+
+	offset := localPort - lStart
+	targetPort := uStart + offset
+	return FormatHostPort(uHost, targetPort), nil
+}
+
 // Load reads and parses a YAML configuration file with environment variable expansion.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -675,10 +813,42 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("service %q: upstream address cannot be empty", name)
 		}
 
-		if prev, exists := usedListenPorts[svc.Listen]; exists {
-			return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, svc.Listen, prev)
+		lHost, lStart, lEnd, err := ParsePortRange(svc.Listen)
+		if err != nil {
+			return fmt.Errorf("service %q: invalid listen address %q: %w", name, svc.Listen, err)
 		}
-		usedListenPorts[svc.Listen] = name
+
+		_, uStart, uEnd, err := ParsePortRange(svc.Upstream)
+		if err != nil {
+			return fmt.Errorf("service %q: invalid upstream address %q: %w", name, svc.Upstream, err)
+		}
+
+		lSpan := lEnd - lStart + 1
+		uSpan := uEnd - uStart + 1
+		if lSpan == 1 && uSpan > 1 {
+			return fmt.Errorf("service %q: single listen port cannot map to an upstream port range", name)
+		}
+		if lSpan > 1 && uSpan > 1 && lSpan != uSpan {
+			return fmt.Errorf("service %q: upstream port range size (%d) must match listen port range size (%d) for 1:1 mapping, or specify a single upstream port for many-to-one", name, uSpan, lSpan)
+		}
+
+		for p := lStart; p <= lEnd; p++ {
+			portKey := FormatHostPort(lHost, p)
+			if prev, exists := usedListenPorts[portKey]; exists {
+				return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, portKey, prev)
+			}
+
+			// If wildcard listener (e.g. ":8080" or "0.0.0.0:8080"), conflict with other wildcards
+			if lHost == "" || lHost == "0.0.0.0" || lHost == "::" {
+				anyKey := fmt.Sprintf("*:%d", p)
+				if prev, exists := usedListenPorts[anyKey]; exists {
+					return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, portKey, prev)
+				}
+				usedListenPorts[anyKey] = name
+			}
+
+			usedListenPorts[portKey] = name
+		}
 
 		switch svc.Protocol {
 		case "ssh", "smtp", "pop3", "imap", "tcp", "generic":

@@ -293,6 +293,148 @@ services:
 	}
 }
 
+func TestUpdatePluginEnablement_Variants(t *testing.T) {
+	t.Run("plugins empty mapping format", func(t *testing.T) {
+		initialYAML := `version: "1.0"
+plugins: {}
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+`
+		tmp, err := os.CreateTemp("", "test-empty-map-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmp.Name())
+		_ = os.WriteFile(tmp.Name(), []byte(initialYAML), 0644)
+
+		if err := UpdatePluginEnablement(tmp.Name(), "postgres", true); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err := Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if !cfg.IsPluginEnabled("postgres") {
+			t.Errorf("expected postgres to be enabled")
+		}
+
+		// Disable it
+		if err := UpdatePluginEnablement(tmp.Name(), "postgres", false); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err = Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if cfg.IsPluginEnabled("postgres") {
+			t.Errorf("expected postgres to be disabled")
+		}
+	})
+
+	t.Run("missing plugins section", func(t *testing.T) {
+		initialYAML := `version: "1.0"
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+`
+		tmp, err := os.CreateTemp("", "test-missing-sec-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmp.Name())
+		_ = os.WriteFile(tmp.Name(), []byte(initialYAML), 0644)
+
+		if err := UpdatePluginEnablement(tmp.Name(), "redis", true); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err := Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if !cfg.IsPluginEnabled("redis") {
+			t.Errorf("expected redis to be enabled")
+		}
+	})
+
+	t.Run("sequence format", func(t *testing.T) {
+		initialYAML := `version: "1.0"
+plugins:
+  - postgres
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+`
+		tmp, err := os.CreateTemp("", "test-seq-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmp.Name())
+		_ = os.WriteFile(tmp.Name(), []byte(initialYAML), 0644)
+
+		// Add redis
+		if err := UpdatePluginEnablement(tmp.Name(), "redis", true); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err := Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if !cfg.IsPluginEnabled("redis") || !cfg.IsPluginEnabled("postgres") {
+			t.Errorf("expected redis and postgres to be enabled")
+		}
+
+		// Disable postgres
+		if err := UpdatePluginEnablement(tmp.Name(), "postgres", false); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err = Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if cfg.IsPluginEnabled("postgres") {
+			t.Errorf("expected postgres to be disabled")
+		}
+	})
+
+	t.Run("disabled list synchronization", func(t *testing.T) {
+		initialYAML := `version: "1.0"
+plugins:
+  disabled:
+    - postgres
+    - redis
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+`
+		tmp, err := os.CreateTemp("", "test-disabled-sync-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmp.Name())
+		_ = os.WriteFile(tmp.Name(), []byte(initialYAML), 0644)
+
+		// Enable postgres
+		if err := UpdatePluginEnablement(tmp.Name(), "postgres", true); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cfg, err := Load(tmp.Name())
+		if err != nil {
+			t.Fatalf("failed loading updated config: %v", err)
+		}
+		if !cfg.IsPluginEnabled("postgres") {
+			t.Errorf("expected postgres to be enabled after removing from disabled list")
+		}
+		if cfg.IsPluginEnabled("redis") {
+			t.Errorf("expected redis to remain disabled")
+		}
+	})
+}
+
 func testingContains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && (s[:len(substr)] == substr || testingContains(s[1:], substr))))
 }

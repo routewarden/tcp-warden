@@ -12,7 +12,6 @@ services:
     network_mode: host
     volumes:
       - tcp-warden-config:/etc/routewarden
-      - tcp-warden-plugins:/var/lib/routewarden/plugins
       - tcp-warden-data:/var/lib/routewarden
       - tcp-warden-logs:/var/log/routewarden
     environment:
@@ -39,8 +38,7 @@ services:
 
 volumes:
   tcp-warden-config:
-  tcp-warden-plugins:
-  tcp-warden-data:   # persistent runtime state: bans.db (SQLite)
+  tcp-warden-data:   # persistent runtime state: bans.db (SQLite) & plugins cache
   tcp-warden-logs:
   crowdsec-db:
   crowdsec-config:

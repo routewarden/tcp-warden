@@ -374,12 +374,24 @@ func SyncPluginFromSource(name string, source string, opts InstallOptions) (*Ins
 	// 3. Cache the staged plugin in opts.CacheDir/<name>
 	cachedPluginDir := filepath.Join(opts.CacheDir, name)
 	if err := os.MkdirAll(opts.CacheDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating plugin cache directory %s: %w", opts.CacheDir, err)
+		opts.CacheDir = filepath.Join(opts.ProjectDir, ".plugins_cache")
+		cachedPluginDir = filepath.Join(opts.CacheDir, name)
+		_ = os.MkdirAll(opts.CacheDir, 0755)
 	}
 
 	_ = os.RemoveAll(cachedPluginDir)
 	if err := copyDir(stagedDir, cachedPluginDir); err != nil {
-		return nil, fmt.Errorf("caching plugin %q to %s: %w", name, cachedPluginDir, err)
+		// If caching to opts.CacheDir fails (e.g. shadowed volume mount, unwritable volume),
+		// gracefully fallback to local cache directory in project directory
+		fallbackCacheDir := filepath.Join(opts.ProjectDir, ".plugins_cache")
+		fallbackPluginDir := filepath.Join(fallbackCacheDir, name)
+		_ = os.MkdirAll(fallbackCacheDir, 0755)
+		_ = os.RemoveAll(fallbackPluginDir)
+		if fErr := copyDir(stagedDir, fallbackPluginDir); fErr == nil {
+			cachedPluginDir = fallbackPluginDir
+		} else {
+			return nil, fmt.Errorf("caching plugin %q to %s: %w", name, cachedPluginDir, err)
+		}
 	}
 
 	fmt.Printf("✓ [PLUGIN CACHE] Successfully cached fresh plugin %q at %s\n", name, cachedPluginDir)

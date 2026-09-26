@@ -59,13 +59,9 @@ type installedRegistry struct {
 
 // InstallPlugin installs a plugin from a GitHub URL or local repository path.
 func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
-	if opts.PluginsDir == "" {
-		opts.PluginsDir = "plugins"
-	}
-	if opts.ProjectDir == "" {
-		opts.ProjectDir = "."
-	}
-	if !filepath.IsAbs(opts.PluginsDir) {
+	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
+	opts.PluginsDir = ResolvePluginsDir(opts.PluginsDir, opts.ProjectDir)
+	if !filepath.IsAbs(opts.PluginsDir) && !strings.HasPrefix(opts.PluginsDir, opts.ProjectDir) {
 		opts.PluginsDir = filepath.Join(opts.ProjectDir, opts.PluginsDir)
 	}
 
@@ -178,6 +174,7 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 			return nil, fmt.Errorf("rebuilding tcp-warden with new plugin: %v (output: %s)", bErr, string(buildOut))
 		}
 		rebuilt = true
+		updateInstalledExecutable(filepath.Join(opts.ProjectDir, "tcp-warden"))
 	}
 
 	res := &InstallResult{
@@ -193,6 +190,97 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	}
 
 	return res, nil
+}
+
+// ResolveProjectDir returns the root directory of the tcp-warden project containing go.mod and plugins/.
+// Priority:
+// 1. Explicit customDir if non-empty and not "."
+// 2. ROUTEWARDEN_SRC_DIR or ROUTEWARDEN_PROJECT_DIR environment variable
+// 3. Current working directory if go.mod or plugins/all/all.go exists
+// 4. Standard container source locations (/usr/src/tcp-warden, /src)
+// 5. Fallback to "."
+func ResolveProjectDir(customDir string) string {
+	if customDir != "" && customDir != "." {
+		return customDir
+	}
+	if env := os.Getenv("ROUTEWARDEN_SRC_DIR"); env != "" {
+		if fi, err := os.Stat(env); err == nil && fi.IsDir() {
+			return env
+		}
+	}
+	if env := os.Getenv("ROUTEWARDEN_PROJECT_DIR"); env != "" {
+		if fi, err := os.Stat(env); err == nil && fi.IsDir() {
+			return env
+		}
+	}
+	if _, err := os.Stat(filepath.Join(".", "plugins", "all", "all.go")); err == nil {
+		return "."
+	}
+	if _, err := os.Stat("go.mod"); err == nil {
+		return "."
+	}
+	candidates := []string{"/usr/src/tcp-warden", "/src"}
+	for _, cand := range candidates {
+		if _, err := os.Stat(filepath.Join(cand, "plugins", "all", "all.go")); err == nil {
+			return cand
+		}
+		if _, err := os.Stat(filepath.Join(cand, "go.mod")); err == nil {
+			return cand
+		}
+	}
+	if customDir != "" {
+		return customDir
+	}
+	return "."
+}
+
+// ResolvePluginsDir returns the directory containing the modular plugins.
+func ResolvePluginsDir(customPluginsDir string, projectDir string) string {
+	if customPluginsDir != "" && customPluginsDir != "plugins" {
+		return customPluginsDir
+	}
+	if _, err := os.Stat(filepath.Join(".", "plugins", "all", "all.go")); err == nil {
+		return "plugins"
+	}
+	if projectDir != "" && projectDir != "." {
+		return filepath.Join(projectDir, "plugins")
+	}
+	return "plugins"
+}
+
+// updateInstalledExecutable updates the currently running binary (such as /usr/local/bin/tcp-warden)
+// with the newly built binary if running from a different path.
+func updateInstalledExecutable(newBinaryPath string) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if resolvedExec, err := filepath.EvalSymlinks(execPath); err == nil {
+		execPath = resolvedExec
+	}
+
+	absExec, err := filepath.Abs(execPath)
+	if err != nil {
+		return
+	}
+	absNew, err := filepath.Abs(newBinaryPath)
+	if err != nil {
+		return
+	}
+
+	if absExec == absNew {
+		return
+	}
+
+	// Copy new binary to temporary file alongside target executable, then atomic rename
+	tmpTarget := absExec + ".tmp"
+	if err := copyFile(absNew, tmpTarget); err != nil {
+		return
+	}
+	_ = os.Chmod(tmpTarget, 0755)
+	if err := os.Rename(tmpTarget, absExec); err != nil {
+		_ = os.Remove(tmpTarget)
+	}
 }
 
 // GetPluginsCacheDir returns the directory used to cache downloaded plugins.
@@ -223,12 +311,8 @@ func SyncPluginFromSource(name string, source string, opts InstallOptions) (*Ins
 	if opts.CacheDir == "" {
 		opts.CacheDir = GetPluginsCacheDir()
 	}
-	if opts.PluginsDir == "" {
-		opts.PluginsDir = "plugins"
-	}
-	if opts.ProjectDir == "" {
-		opts.ProjectDir = "."
-	}
+	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
+	opts.PluginsDir = ResolvePluginsDir(opts.PluginsDir, opts.ProjectDir)
 
 	name = strings.ToLower(strings.TrimSpace(name))
 	source = strings.TrimSpace(source)
@@ -397,7 +481,14 @@ func stagePluginSource(source string) (string, bool, error) {
 func registerInAllGo(allGoPath string, pluginName string) error {
 	content, err := os.ReadFile(allGoPath)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			if mErr := os.MkdirAll(filepath.Dir(allGoPath), 0755); mErr != nil {
+				return fmt.Errorf("creating directory for %s: %w", allGoPath, mErr)
+			}
+			content = []byte("package all\n\nimport (\n)\n")
+		} else {
+			return err
+		}
 	}
 
 	importPath := fmt.Sprintf(`_ "github.com/routewarden/tcp-warden/plugins/%s"`, pluginName)
@@ -419,6 +510,9 @@ func registerInAllGo(allGoPath string, pluginName string) error {
 func unregisterFromAllGo(allGoPath string, pluginName string) error {
 	content, err := os.ReadFile(allGoPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -438,11 +532,10 @@ func unregisterFromAllGo(allGoPath string, pluginName string) error {
 
 // UninstallPlugin removes an installed plugin.
 func UninstallPlugin(name string, opts InstallOptions) error {
-	if opts.PluginsDir == "" {
-		opts.PluginsDir = "plugins"
-	}
-	if opts.ProjectDir == "" {
-		opts.ProjectDir = "."
+	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
+	opts.PluginsDir = ResolvePluginsDir(opts.PluginsDir, opts.ProjectDir)
+	if !filepath.IsAbs(opts.PluginsDir) && !strings.HasPrefix(opts.PluginsDir, opts.ProjectDir) {
+		opts.PluginsDir = filepath.Join(opts.ProjectDir, opts.PluginsDir)
 	}
 
 	nameKey := strings.ToLower(strings.TrimSpace(name))
@@ -457,7 +550,9 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 	if !opts.NoBuild {
 		buildCmd := exec.Command("go", "build", "-o", "tcp-warden", ".")
 		buildCmd.Dir = opts.ProjectDir
-		_ = buildCmd.Run()
+		if err := buildCmd.Run(); err == nil {
+			updateInstalledExecutable(filepath.Join(opts.ProjectDir, "tcp-warden"))
+		}
 	}
 
 	return nil

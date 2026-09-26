@@ -3,6 +3,7 @@ package plugins_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/routewarden/tcp-warden/plugins"
@@ -238,4 +239,75 @@ func TestParseGitSource(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveProjectDir_EnvironmentVariable(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-src-dir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origEnv := os.Getenv("ROUTEWARDEN_SRC_DIR")
+	defer os.Setenv("ROUTEWARDEN_SRC_DIR", origEnv)
+
+	os.Setenv("ROUTEWARDEN_SRC_DIR", tmpDir)
+	resolved := plugins.ResolveProjectDir("")
+	if resolved != tmpDir {
+		t.Errorf("expected %s, got %s", tmpDir, resolved)
+	}
+
+	pluginsDir := plugins.ResolvePluginsDir("", resolved)
+	expectedPlugins := filepath.Join(tmpDir, "plugins")
+	if pluginsDir != expectedPlugins {
+		t.Errorf("expected %s, got %s", expectedPlugins, pluginsDir)
+	}
+}
+
+func TestInstallPlugin_MissingAllGoCreated(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-missing-allgo-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockPluginDir := filepath.Join(tmpDir, "simple_plugin")
+	_ = os.MkdirAll(mockPluginDir, 0755)
+
+	manifestContent := `name: simple_plugin
+version: 1.0.0
+protocols:
+  - simple_proto
+`
+	_ = os.WriteFile(filepath.Join(mockPluginDir, "plugin.yaml"), []byte(manifestContent), 0644)
+	_ = os.WriteFile(filepath.Join(mockPluginDir, "dummy_test.go"), []byte("package simple_plugin\n"), 0644)
+
+	// Note: target plugins dir does NOT have all/all.go initially
+	targetPluginsDir := filepath.Join(tmpDir, "plugins")
+
+	opts := plugins.InstallOptions{
+		PluginsDir: targetPluginsDir,
+		ProjectDir: tmpDir,
+		NoBuild:    true,
+	}
+
+	res, err := plugins.InstallPlugin(mockPluginDir, opts)
+	if err != nil {
+		t.Fatalf("InstallPlugin failed with missing all.go: %v", err)
+	}
+
+	if res.Name != "simple_plugin" {
+		t.Errorf("expected simple_plugin, got %s", res.Name)
+	}
+
+	// Verify all.go was created and has import
+	allGoPath := filepath.Join(targetPluginsDir, "all", "all.go")
+	content, err := os.ReadFile(allGoPath)
+	if err != nil {
+		t.Fatalf("expected all.go to be created, err: %v", err)
+	}
+	if !strings.Contains(string(content), `"github.com/routewarden/tcp-warden/plugins/simple_plugin"`) {
+		t.Errorf("expected import in all.go, got: %s", string(content))
+	}
+}
+
 

@@ -55,7 +55,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	enabledList := append([]string(nil), cfg.Plugins.Enabled...)
 	disabledList := append([]string(nil), cfg.Plugins.Disabled...)
 
-	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement(plugins.ResolveProjectDir("")); err == nil {
 		for _, pe := range pEnabled {
 			if _, exists := cfg.Plugins.Entries[pe]; !exists {
 				disabledList = removeFromList(disabledList, pe)

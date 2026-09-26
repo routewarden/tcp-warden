@@ -88,7 +88,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	// Check if any active service uses a disabled plugin
 	for name, svc := range cfg.Services {
 		if svc.IsEnabled() {
-			switch svc.Protocol {
+			switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
 			case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
 				// Standard protocol
 			default:

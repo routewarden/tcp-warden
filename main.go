@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "1.0.3"
+	version = "1.0.5"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -443,8 +443,12 @@ func handlePlugins(args []string) {
 		handlePluginsDisable(subargs)
 	case "install":
 		handlePluginsInstall(subargs)
+	case "create", "init", "new":
+		handlePluginsCreate(subargs)
 	case "uninstall", "remove":
 		handlePluginsUninstall(subargs)
+	case "help", "--help", "-h":
+		printPluginsUsage()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown plugins subcommand: %s\n\n", subcmd)
 		printPluginsUsage()
@@ -460,6 +464,7 @@ Usage:
 
 Commands:
   list                      List all registered plugins and their enabled/health status
+  create <name>             Scaffold a new plugin with boilerplate and default service
   enable <name>             Enable a plugin and update config file
   disable <name>            Disable a plugin and update config file
   test [name]               Execute synthetic self-tests on registered plugins
@@ -531,6 +536,14 @@ func handlePluginsInstall(args []string) {
 			} else {
 				fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: true)\n", cfgPath, res.Name)
 			}
+
+			// Auto-add default service definition if not already present
+			if added, svcName, err := config.AddDefaultPluginService(cfgPath, res.Name, res.DefaultService); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ Failed to add default service to %s: %v\n", cfgPath, err)
+			} else if added {
+				fmt.Printf("✓ Auto-added default service %q in %s (%s -> %s, protocol: %s)\n",
+					svcName, cfgPath, res.DefaultService.Listen, res.DefaultService.Upstream, res.DefaultService.Protocol)
+			}
 		}
 
 		fmt.Printf("✓ Plugin %q [%s] installed and ACTIVATED successfully!\n", res.Name, res.Version)
@@ -594,6 +607,55 @@ func handlePluginsUninstall(args []string) {
 	fmt.Printf("✓ Plugin %q uninstalled successfully.\n", name)
 }
 
+func handlePluginsCreate(args []string) {
+	fs := flag.NewFlagSet("plugins create", flag.ExitOnError)
+	proto := fs.String("protocol", "", "Protocol identifier (default: plugin name)")
+	listen := fs.String("listen", "", "Default service listen address (e.g. :9000)")
+	upstream := fs.String("upstream", "", "Default service upstream target (e.g. 127.0.0.1:9001)")
+	dir := fs.String("dir", "", "Target directory to generate plugin scaffold")
+	noService := fs.Bool("no-service", false, "Do not auto-add default service to configuration")
+	configPath := fs.String("config", "", "Path to YAML config file")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file")
+	_ = fs.Parse(normalizeArgs(args))
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins create <plugin-name> [--protocol <proto>] [--listen <port>] [--upstream <target>] [--dir <path>] [--no-service]")
+		os.Exit(1)
+	}
+	name := strings.ToLower(strings.TrimSpace(fs.Args()[0]))
+
+	fmt.Printf("🛠️  Scaffolding modular plugin: %s\n", name)
+	res, err := plugins.CreatePlugin(plugins.CreatePluginOptions{
+		Name:       name,
+		Protocol:   *proto,
+		Listen:     *listen,
+		Upstream:   *upstream,
+		TargetDir:  *dir,
+		ProjectDir: ".",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed creating plugin: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✨ Created plugin %q successfully!\n", res.Name)
+	fmt.Printf("  • Directory:      %s\n", res.Directory)
+	fmt.Printf("  • Manifest:       %s\n", res.ManifestPath)
+	fmt.Printf("  • Registered:     plugins/all/all.go\n")
+
+	if !*noService {
+		cfgPath := resolveConfigPath(*configPath)
+		_ = ensureConfigFile(cfgPath)
+		if _, err := os.Stat(cfgPath); err == nil {
+			_ = config.UpdatePluginEnablement(cfgPath, res.Name, true)
+			if added, svcName, err := config.AddDefaultPluginService(cfgPath, res.Name, res.DefaultService); err == nil && added {
+				fmt.Printf("✓ Auto-added default service %q in %s (%s -> %s, protocol: %s)\n",
+					svcName, cfgPath, res.DefaultService.Listen, res.DefaultService.Upstream, res.DefaultService.Protocol)
+			}
+		}
+	}
+}
+
 func handlePluginsEnable(args []string) {
 	fs := flag.NewFlagSet("plugins enable", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to YAML config file")
@@ -622,6 +684,9 @@ func handlePluginsEnable(args []string) {
 			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
 		} else {
 			fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: true)\n", cfgPath, name)
+		}
+		if added, svcName, err := config.AddDefaultPluginService(cfgPath, name, nil); err == nil && added {
+			fmt.Printf("✓ Auto-added default service %q in %s\n", svcName, cfgPath)
 		}
 	}
 }

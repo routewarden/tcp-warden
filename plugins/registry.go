@@ -2,7 +2,9 @@ package plugins
 
 import (
 	"fmt"
+	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,9 +16,10 @@ import (
 type PluginStatus string
 
 const (
-	StatusPending  PluginStatus = "PENDING"
-	StatusActive   PluginStatus = "ACTIVE"
-	StatusDisabled PluginStatus = "DISABLED"
+	StatusPending      PluginStatus = "PENDING"
+	StatusActive       PluginStatus = "ACTIVE"
+	StatusDisabled     PluginStatus = "DISABLED"
+	StatusIncompatible PluginStatus = "INCOMPATIBLE"
 )
 
 // PluginInfo provides human-readable summary of a registered plugin.
@@ -68,6 +71,49 @@ func Register(p sdk.Plugin) {
 	globalRegistry.Register(p)
 }
 
+// CompareVersions compares two semver version strings (e.g. "1.2.0" and "1.1.5").
+// Returns -1 if v1 < v2, 0 if v1 == v2, and 1 if v1 > v2.
+func CompareVersions(v1, v2 string) int {
+	v1 = strings.TrimPrefix(strings.TrimSpace(v1), "v")
+	v2 = strings.TrimPrefix(strings.TrimSpace(v2), "v")
+
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+
+	maxLen := len(parts1)
+	if len(parts2) > maxLen {
+		maxLen = len(parts2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var n1, n2 int
+		if i < len(parts1) {
+			n1, _ = strconv.Atoi(parts1[i])
+		}
+		if i < len(parts2) {
+			n2, _ = strconv.Atoi(parts2[i])
+		}
+		if n1 < n2 {
+			return -1
+		}
+		if n1 > n2 {
+			return 1
+		}
+	}
+	return 0
+}
+
+// CheckCompatibility verifies if a plugin manifest is compatible with the running RouteWarden manifest version
+// using Semantic Versioning (SemVer 2.0.0) rules.
+func CheckCompatibility(m sdk.Manifest) error {
+	if m.ManifestVersion != "" {
+		if err := CheckSemVerCompatibility(sdk.ManifestVersion, m.ManifestVersion); err != nil {
+			return fmt.Errorf("incompatible manifest version %q with host %s: %w", m.ManifestVersion, sdk.ManifestVersion, err)
+		}
+	}
+	return nil
+}
+
 func (r *Registry) Register(p sdk.Plugin) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -75,11 +121,23 @@ func (r *Registry) Register(p sdk.Plugin) {
 	manifest := p.Manifest()
 	nameKey := strings.ToLower(manifest.Name)
 
+	status := StatusDisabled
+	reason := "disabled by default"
+	if err := manifest.Validate(); err != nil {
+		status = StatusIncompatible
+		reason = fmt.Sprintf("invalid manifest: %v", err)
+		log.Printf("⚠️  [REGISTRY] Plugin %q manifest validation failed: %v. Disabling.", manifest.Name, err)
+	} else if err := CheckCompatibility(manifest); err != nil {
+		status = StatusIncompatible
+		reason = fmt.Sprintf("incompatible manifest version: %v", err)
+		log.Printf("⚠️  [REGISTRY] Plugin %q is incompatible: %v. Disabling.", manifest.Name, err)
+	}
+
 	r.plugins[nameKey] = &entry{
 		plugin:        p,
 		enabled:       false, // pre-shipped non-standard plugins disabled by default
-		status:        StatusDisabled,
-		disableReason: "disabled by default",
+		status:        status,
+		disableReason: reason,
 	}
 
 	for _, proto := range manifest.Protocols {
@@ -110,13 +168,32 @@ func (r *Registry) Enable(nameOrProto string) error {
 		return fmt.Errorf("plugin %q not found", nameOrProto)
 	}
 
-	// 2. Run self-test without holding any lock (may take up to 3 seconds).
+	// 2. Validate manifest and check compatibility
+	man := ent.plugin.Manifest()
+	if err := man.Validate(); err != nil {
+		r.mu.Lock()
+		ent.enabled = false
+		ent.status = StatusIncompatible
+		ent.disableReason = fmt.Sprintf("invalid manifest: %v", err)
+		r.mu.Unlock()
+		return fmt.Errorf("plugin %q has invalid manifest: %w", nameOrProto, err)
+	}
+	if err := CheckCompatibility(man); err != nil {
+		r.mu.Lock()
+		ent.enabled = false
+		ent.status = StatusIncompatible
+		ent.disableReason = fmt.Sprintf("incompatible manifest version: %v", err)
+		r.mu.Unlock()
+		return fmt.Errorf("plugin %q is incompatible with RouteWarden manifest version %s: %w", nameOrProto, sdk.ManifestVersion, err)
+	}
+
+	// 3. Run self-test without holding any lock (may take up to 3 seconds).
 	start := time.Now()
 	err := ent.plugin.SelfTest()
 	testTime := time.Now()
 	_ = start
 
-	// 3. Commit result under write lock.
+	// 4. Commit result under write lock.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

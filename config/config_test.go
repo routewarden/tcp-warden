@@ -27,8 +27,22 @@ func (m *mockValidationPlugin) CreateInspector(map[string]any) (sdk.Inspector, e
 }
 func (m *mockValidationPlugin) SelfTest() error { return nil }
 
+type mockTestPlugin struct {
+	name      string
+	protocols []string
+}
+
+func (m *mockTestPlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{Name: m.name, Version: "1.0.0", Protocols: m.protocols}
+}
+func (m *mockTestPlugin) ValidateConfig(map[string]any) error { return nil }
+func (m *mockTestPlugin) CreateInspector(map[string]any) (sdk.Inspector, error) { return nil, nil }
+func (m *mockTestPlugin) SelfTest() error { return nil }
+
 func init() {
 	plugins.Register(&mockValidationPlugin{})
+	plugins.Register(&mockTestPlugin{name: "ftp", protocols: []string{"ftp"}})
+	plugins.Register(&mockTestPlugin{name: "redis", protocols: []string{"redis"}})
 }
 
 func TestParseYAML(t *testing.T) {
@@ -433,6 +447,78 @@ services:
 			t.Errorf("expected redis to remain disabled")
 		}
 	})
+}
+
+func TestAddDefaultPluginService(t *testing.T) {
+	initialYAML := `version: "1.0"
+services:
+  ssh:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+    protocol: "ssh"
+`
+	tmp, err := os.CreateTemp("", "test-add-default-svc-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	_ = os.WriteFile(tmp.Name(), []byte(initialYAML), 0644)
+
+	// 1. Enable FTP and add FTP default service
+	_ = UpdatePluginEnablement(tmp.Name(), "ftp", true)
+	added, name, err := AddDefaultPluginService(tmp.Name(), "ftp", nil)
+	if err != nil {
+		t.Fatalf("AddDefaultPluginService failed: %v", err)
+	}
+	if !added || name != "ftp" {
+		t.Fatalf("expected ftp service to be added, got added=%v name=%s", added, name)
+	}
+
+	cfg, err := Load(tmp.Name())
+	if err != nil {
+		t.Fatalf("failed loading config after adding service: %v", err)
+	}
+	svc, ok := cfg.Services["ftp"]
+	if !ok {
+		t.Fatalf("expected ftp service in loaded config")
+	}
+	if svc.Listen != ":2121" || svc.Upstream != "127.0.0.1:21" || svc.Protocol != "ftp" {
+		t.Errorf("unexpected ftp service config: %+v", svc)
+	}
+
+	// 2. Calling again should be idempotent and not duplicate
+	addedAgain, _, err := AddDefaultPluginService(tmp.Name(), "ftp", nil)
+	if err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+	if addedAgain {
+		t.Errorf("expected second call to not add duplicate service")
+	}
+
+	// 3. Enable Redis and add Redis with plugin_config
+	_ = UpdatePluginEnablement(tmp.Name(), "redis", true)
+	addedRedis, redisName, err := AddDefaultPluginService(tmp.Name(), "redis", nil)
+	if err != nil {
+		t.Fatalf("AddDefaultPluginService for redis failed: %v", err)
+	}
+	if !addedRedis || redisName != "redis" {
+		t.Fatalf("expected redis service to be added, got added=%v name=%s", addedRedis, redisName)
+	}
+
+	cfg2, err := Load(tmp.Name())
+	if err != nil {
+		t.Fatalf("failed loading config after adding redis: %v", err)
+	}
+	rSvc, ok := cfg2.Services["redis"]
+	if !ok {
+		t.Fatalf("expected redis service in loaded config")
+	}
+	if rSvc.Listen != ":6380" || rSvc.Protocol != "redis" {
+		t.Errorf("unexpected redis service config: %+v", rSvc)
+	}
+	if len(rSvc.PluginConfig) == 0 {
+		t.Errorf("expected redis plugin_config to be preserved")
+	}
 }
 
 func testingContains(s, substr string) bool {

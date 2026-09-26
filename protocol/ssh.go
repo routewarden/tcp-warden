@@ -73,6 +73,14 @@ func (c *sshMonitorConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite forwards half-close to the underlying Conn if supported.
+func (c *sshMonitorConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 func (c *sshMonitorConn) scan() {
 	for len(c.buf) >= 6 {
 		pktLen := int(c.buf[0])<<24 | int(c.buf[1])<<16 | int(c.buf[2])<<8 | int(c.buf[3])

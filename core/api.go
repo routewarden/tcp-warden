@@ -3,7 +3,9 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
@@ -179,8 +181,9 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.IP == "" {
-		http.Error(w, `{"error":"ip is required"}`, http.StatusBadRequest)
+	req.IP = strings.TrimSpace(req.IP)
+	if req.IP == "" || net.ParseIP(req.IP) == nil {
+		http.Error(w, `{"error":"invalid or missing ip"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -207,8 +210,9 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.IP == "" {
-		http.Error(w, `{"error":"ip is required"}`, http.StatusBadRequest)
+	req.IP = strings.TrimSpace(req.IP)
+	if req.IP == "" || net.ParseIP(req.IP) == nil {
+		http.Error(w, `{"error":"invalid or missing ip"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -239,8 +243,9 @@ func (a *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	token := a.cfg.API.AuthToken
 	if token != "" {
 		authHeader := r.Header.Get("Authorization")
+		customHeader := r.Header.Get("X-Warden-Token")
 		queryToken := r.URL.Query().Get("token")
-		if authHeader != "Bearer "+token && queryToken != token {
+		if authHeader != "Bearer "+token && customHeader != token && queryToken != token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

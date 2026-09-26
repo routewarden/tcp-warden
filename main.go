@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "1.0.1"
+	version = "1.0.2"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -424,7 +424,7 @@ func handlePlugins(args []string) {
 
 	switch subcmd {
 	case "list":
-		handlePluginsList()
+		handlePluginsList(subargs)
 	case "test":
 		handlePluginsTest(subargs)
 	case "enable":
@@ -460,6 +460,7 @@ Flags (enable / disable):
   --config, -c  Path to YAML config file to update (default: tcp-warden.yaml)
 
 Flags (install):
+  --config, -c  Path to YAML config file to update (default: tcp-warden.yaml)
   --force       Overwrite existing plugin and cache directory
   --no-build    Skip rebuilding tcp-warden binary after installation
   --cache-dir   Path to plugin cache directory (default: $ROUTEWARDEN_PLUGINS_CACHE)
@@ -479,13 +480,15 @@ Examples:
 
 func handlePluginsInstall(args []string) {
 	fs := flag.NewFlagSet("plugins install", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to YAML config file to update")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file to update")
 	force := fs.Bool("force", false, "Overwrite existing plugin and cache directory")
 	noBuild := fs.Bool("no-build", false, "Skip rebuilding tcp-warden binary")
 	cacheDir := fs.String("cache-dir", "", "Path to plugin cache directory")
 	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins install <github-url-or-local-path> [--force] [--no-build] [--cache-dir <dir>]")
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins install <github-url-or-local-path> [--config <path>] [--force] [--no-build] [--cache-dir <dir>]")
 		os.Exit(1)
 	}
 	source := fs.Args()[0]
@@ -505,14 +508,35 @@ func handlePluginsInstall(args []string) {
 
 	fmt.Println()
 	if res.TestPassed {
-		fmt.Printf("✓ Plugin %q [%s] installed successfully!\n", res.Name, res.Version)
-		fmt.Printf("  • Status:     %s\n", res.Status)
+		// Auto-activate plugin in runtime registry and plugins.json
+		_ = plugins.SavePluginEnablement(plugins.ResolveProjectDir(""), res.Name, true)
+		_ = plugins.Global().Enable(res.Name)
+
+		// Auto-activate plugin in YAML configuration
+		cfgPath := resolveConfigPath(*configPath)
+		_ = ensureConfigFile(cfgPath)
+		if _, err := os.Stat(cfgPath); err == nil {
+			if err := config.UpdatePluginEnablement(cfgPath, res.Name, true); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
+			} else {
+				fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: true)\n", cfgPath, res.Name)
+			}
+		}
+
+		fmt.Printf("✓ Plugin %q [%s] installed and ACTIVATED successfully!\n", res.Name, res.Version)
+		fmt.Printf("  • Status:     ACTIVE (enabled)\n")
 		fmt.Printf("  • Protocols:  %s\n", strings.Join(res.Protocols, ", "))
 		fmt.Printf("  • Pre-Tests:  PASSED\n")
 		if res.Rebuilt {
 			fmt.Printf("  • Binary:     rebuilt successfully with new plugin\n")
 		}
 	} else {
+		_ = plugins.SavePluginEnablement(plugins.ResolveProjectDir(""), res.Name, false)
+		cfgPath := resolveConfigPath(*configPath)
+		if _, err := os.Stat(cfgPath); err == nil {
+			_ = config.UpdatePluginEnablement(cfgPath, res.Name, false)
+		}
+
 		fmt.Printf("⚠️ Plugin %q [%s] was installed but DISABLED due to test failure:\n", res.Name, res.Version)
 		fmt.Printf("  • Status:     DISABLED\n")
 		fmt.Printf("  • Pre-Tests:  FAILED\n")
@@ -526,14 +550,16 @@ func handlePluginsInstall(args []string) {
 
 func handlePluginsUninstall(args []string) {
 	fs := flag.NewFlagSet("plugins uninstall", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to YAML config file to update")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file to update")
 	noBuild := fs.Bool("no-build", false, "Skip rebuilding tcp-warden binary")
 	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins uninstall <plugin-name> [--no-build]")
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden plugins uninstall <plugin-name> [--config <path>] [--no-build]")
 		os.Exit(1)
 	}
-	name := fs.Args()[0]
+	name := strings.ToLower(strings.TrimSpace(fs.Args()[0]))
 
 	fmt.Printf("🗑️  Uninstalling plugin: %s\n", name)
 	if err := plugins.UninstallPlugin(name, plugins.InstallOptions{
@@ -546,9 +572,13 @@ func handlePluginsUninstall(args []string) {
 	}
 
 	// Also ensure configuration disables the uninstalled plugin
-	cfgPath := resolveConfigPath("")
+	cfgPath := resolveConfigPath(*configPath)
 	if _, err := os.Stat(cfgPath); err == nil {
-		_ = config.UpdatePluginEnablement(cfgPath, name, false)
+		if err := config.UpdatePluginEnablement(cfgPath, name, false); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
+		} else {
+			fmt.Printf("✓ Updated configuration in %s (plugins.%s.enabled: false)\n", cfgPath, name)
+		}
 	}
 
 	fmt.Printf("✓ Plugin %q uninstalled successfully.\n", name)
@@ -576,6 +606,7 @@ func handlePluginsEnable(args []string) {
 	fmt.Printf("✓ Plugin %q is now ENABLED and ACTIVE.\n", name)
 
 	cfgPath := resolveConfigPath(*configPath)
+	_ = ensureConfigFile(cfgPath)
 	if _, err := os.Stat(cfgPath); err == nil {
 		if err := config.UpdatePluginEnablement(cfgPath, name, true); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
@@ -606,6 +637,7 @@ func handlePluginsDisable(args []string) {
 	fmt.Printf("✓ Plugin %q is now DISABLED.\n", name)
 
 	cfgPath := resolveConfigPath(*configPath)
+	_ = ensureConfigFile(cfgPath)
 	if _, err := os.Stat(cfgPath); err == nil {
 		if err := config.UpdatePluginEnablement(cfgPath, name, false); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️ Failed to update configuration file %s: %v\n", cfgPath, err)
@@ -615,11 +647,16 @@ func handlePluginsDisable(args []string) {
 	}
 }
 
-func handlePluginsList() {
+func handlePluginsList(args []string) {
+	fs := flag.NewFlagSet("plugins list", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to YAML config file")
+	fs.StringVar(configPath, "c", "", "Path to YAML config file")
+	_ = fs.Parse(normalizeArgs(args))
+
 	var enabledList []string
 	var disabledList []string
 
-	cfgPath := resolveConfigPath("")
+	cfgPath := resolveConfigPath(*configPath)
 
 	var cfg *config.Config
 	// 1. Sync base enablement from configuration if file exists

@@ -164,6 +164,11 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 		InstalledAt: time.Now().UTC(),
 	}
 	_ = saveInstalledEntry(opts.ProjectDir, installedEntry)
+	if testPassed {
+		_ = SavePluginEnablement(opts.ProjectDir, manifest.Name, true)
+	} else {
+		_ = SavePluginEnablement(opts.ProjectDir, manifest.Name, false)
+	}
 
 	// 6. Rebuild tcp-warden binary if enabled
 	rebuilt := false
@@ -559,6 +564,7 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 }
 
 func saveInstalledEntry(projectDir string, entry InstalledPluginEntry) error {
+	projectDir = ResolveProjectDir(projectDir)
 	regPath := filepath.Join(projectDir, "plugins.json")
 	var reg installedRegistry
 
@@ -586,6 +592,7 @@ func saveInstalledEntry(projectDir string, entry InstalledPluginEntry) error {
 }
 
 func removeInstalledEntry(projectDir string, name string) error {
+	projectDir = ResolveProjectDir(projectDir)
 	regPath := filepath.Join(projectDir, "plugins.json")
 	var reg installedRegistry
 
@@ -628,6 +635,7 @@ func removeInstalledEntry(projectDir string, name string) error {
 
 // GetInstalledRegistry loads plugins.json if available.
 func GetInstalledRegistry(projectDir string) ([]InstalledPluginEntry, error) {
+	projectDir = ResolveProjectDir(projectDir)
 	regPath := filepath.Join(projectDir, "plugins.json")
 	data, err := os.ReadFile(regPath)
 	if err != nil {
@@ -642,6 +650,7 @@ func GetInstalledRegistry(projectDir string) ([]InstalledPluginEntry, error) {
 
 // SavePluginEnablement persists the enabled/disabled state of a plugin to plugins.json.
 func SavePluginEnablement(projectDir string, name string, enabled bool) error {
+	projectDir = ResolveProjectDir(projectDir)
 	regPath := filepath.Join(projectDir, "plugins.json")
 	var reg installedRegistry
 
@@ -683,6 +692,7 @@ func SavePluginEnablement(projectDir string, name string, enabled bool) error {
 
 // GetPluginEnablement returns lists of enabled and disabled plugins from plugins.json.
 func GetPluginEnablement(projectDir string) ([]string, []string, error) {
+	projectDir = ResolveProjectDir(projectDir)
 	regPath := filepath.Join(projectDir, "plugins.json")
 	data, err := os.ReadFile(regPath)
 	if err != nil {

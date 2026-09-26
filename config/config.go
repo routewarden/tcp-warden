@@ -347,7 +347,7 @@ func (c *Config) IsPluginEnabled(pluginName string) bool {
 	nameLower := strings.ToLower(pluginName)
 
 	// Check runtime / CLI overrides (plugins.json) first
-	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement(plugins.ResolveProjectDir("")); err == nil {
 		for _, pd := range pDisabled {
 			if strings.EqualFold(pd, nameLower) {
 				return false

@@ -184,6 +184,37 @@ func TestAPIServerEndpoints(t *testing.T) {
 	if _, ok := bl.IsBanned("198.51.100.99"); ok {
 		t.Fatalf("expected 198.51.100.99 to be unbanned via API")
 	}
+
+	// 5. Test invalid IP rejection on /api/ban and /api/unban
+	reqBadBan := httptest.NewRequest(http.MethodPost, "/api/ban", bytes.NewReader([]byte(`{"ip":"not-an-ip"}`)))
+	recBadBan := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recBadBan, reqBadBan)
+	if recBadBan.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for invalid IP in ban, got %d", recBadBan.Code)
+	}
+
+	reqBadUnban := httptest.NewRequest(http.MethodPost, "/api/unban", bytes.NewReader([]byte(`{"ip":"not-an-ip"}`)))
+	recBadUnban := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recBadUnban, reqBadUnban)
+	if recBadUnban.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for invalid IP in unban, got %d", recBadUnban.Code)
+	}
+}
+
+func TestEventBus_CloseSubscribeSafety(t *testing.T) {
+	bus := NewEventBus()
+	_, unsub := bus.Subscribe(5)
+	unsub()
+
+	bus.Close()
+
+	// Calling Publish, Subscribe, and unsub after Close must not panic
+	bus.Publish(SecurityEvent{Action: "test"})
+	ch2, unsub2 := bus.Subscribe(5)
+	if _, open := <-ch2; open {
+		t.Errorf("expected channel from closed bus to be closed")
+	}
+	unsub2()
 }
 
 type brokenSelfTestPlugin struct{}

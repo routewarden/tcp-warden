@@ -170,7 +170,7 @@ func (p *Pipeline) proxyWithInspection(
 		p.recordAuthFailure(svc, clientIP, geo)
 	}
 
-	switch svc.Protocol {
+	switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
 	case "ssh":
 		return p.handleSSH(client, upstream, svc, onFailure)
 	case "smtp":

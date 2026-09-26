@@ -2,8 +2,13 @@ package sdk
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ProxyResult tracks bytes transferred and errors during inspection/proxying.
@@ -30,13 +35,79 @@ type Inspector interface {
 	Run(ctx Context, client, upstream net.Conn) (result ProxyResult, blocked bool, reason string, err error)
 }
 
+// DefaultServiceConfig defines the template for a service auto-generated when the plugin is installed.
+type DefaultServiceConfig struct {
+	ServiceName      string         `json:"name,omitempty" yaml:"name,omitempty"`
+	Listen           string         `json:"listen,omitempty" yaml:"listen,omitempty"`
+	Upstream         string         `json:"upstream,omitempty" yaml:"upstream,omitempty"`
+	Protocol         string         `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+	RateLimitCPM     int            `json:"connections_per_minute,omitempty" yaml:"connections_per_minute,omitempty"`
+	RateLimitBurst   int            `json:"burst,omitempty" yaml:"burst,omitempty"`
+	MaxAuthFailures  int            `json:"max_auth_failures,omitempty" yaml:"max_auth_failures,omitempty"`
+	BanAfterFailures int            `json:"ban_after_failures,omitempty" yaml:"ban_after_failures,omitempty"`
+	PluginConfig     map[string]any `json:"plugin_config,omitempty" yaml:"plugin_config,omitempty"`
+}
+
+// ManifestVersion is the specification version of the RouteWarden Plugin Manifest format (v1).
+// Plugins declare compatibility with this manifest schema version (e.g., "1.0.0", "^1.0.0").
+// It evolves independently from host application releases and is not updated by release scripts.
+const ManifestVersion = "1.0.0"
+
+// Version is the current release version of the RouteWarden Plugin SDK (synchronized with RouteWarden releases).
+const Version = "1.0.5"
+
 // Manifest defines identity, version, and capabilities of a plugin.
 type Manifest struct {
-	Name        string   `json:"name" yaml:"name"`
-	Version     string   `json:"version" yaml:"version"`
-	Description string   `json:"description" yaml:"description"`
-	Author      string   `json:"author,omitempty" yaml:"author,omitempty"`
-	Protocols   []string `json:"protocols" yaml:"protocols"`
+	Name            string                `json:"name" yaml:"name"`
+	Version         string                `json:"version" yaml:"version"`
+	ManifestVersion string                `json:"manifest_version,omitempty" yaml:"manifest_version,omitempty"`
+	Description     string                `json:"description" yaml:"description"`
+	Author          string                `json:"author,omitempty" yaml:"author,omitempty"`
+	Protocols       []string              `json:"protocols" yaml:"protocols"`
+	Config          map[string]any        `json:"config,omitempty" yaml:"config,omitempty"`
+	DefaultService  *DefaultServiceConfig `json:"default_service,omitempty" yaml:"default_service,omitempty"`
+}
+
+// Validate checks that the manifest contains required identity fields and valid declarations.
+func (m *Manifest) Validate() error {
+	name := strings.TrimSpace(m.Name)
+	if name == "" {
+		return errors.New("plugin manifest missing required 'name' field")
+	}
+	if strings.ContainsAny(name, "/\\:") || strings.Contains(name, "..") {
+		return fmt.Errorf("plugin manifest 'name' %q contains invalid characters or path separators", m.Name)
+	}
+	if strings.TrimSpace(m.Version) == "" {
+		return errors.New("plugin manifest missing required 'version' field")
+	}
+	if len(m.Protocols) == 0 {
+		return errors.New("plugin manifest missing required 'protocols' field")
+	}
+	for i, p := range m.Protocols {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("plugin manifest protocols[%d] cannot be empty", i)
+		}
+	}
+	return nil
+}
+
+// CheckCompatibility checks if the manifest is compatible with the given host manifest version using SemVer rules.
+// If hostVersion is omitted, sdk.ManifestVersion is used.
+func (m *Manifest) CheckCompatibility(hostVersion ...string) error {
+	if m.ManifestVersion == "" {
+		return nil
+	}
+	hVer := ManifestVersion
+	if len(hostVersion) > 0 && hostVersion[0] != "" {
+		hVer = hostVersion[0]
+	}
+	return CheckSemVerCompatibility(hVer, m.ManifestVersion)
+}
+
+// ConfigMigrator is an optional interface plugins can implement to automatically
+// migrate their service configuration when the plugin or SDK version updates.
+type ConfigMigrator interface {
+	MigrateConfig(fromVersion string, config map[string]any) (map[string]any, error)
 }
 
 // Plugin is the primary interface that all RouteWarden plugins must implement.
@@ -99,3 +170,26 @@ func (d *DefaultContext) OnSecurityEvent(action, reason string) {
 		d.SecurityFunc(action, reason)
 	}
 }
+
+// ParseManifest parses YAML data into an sdk.Manifest and validates its required fields.
+func ParseManifest(data []byte) (Manifest, error) {
+	var m Manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return Manifest{}, fmt.Errorf("parsing plugin manifest: %w", err)
+	}
+	if err := m.Validate(); err != nil {
+		return Manifest{}, fmt.Errorf("validating plugin manifest: %w", err)
+	}
+	return m, nil
+}
+
+// MustParseManifest parses YAML data into an sdk.Manifest or panics on malformed YAML.
+// Ideal for loading embedded plugin.yaml via //go:embed.
+func MustParseManifest(data []byte) Manifest {
+	m, err := ParseManifest(data)
+	if err != nil {
+		panic(fmt.Sprintf("invalid embedded plugin manifest: %v", err))
+	}
+	return m
+}
+

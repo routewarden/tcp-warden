@@ -310,4 +310,140 @@ protocols:
 	}
 }
 
+func TestEnsureBuildPrerequisites(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-prereq-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
 
+	yamlPath := filepath.Join(tmpDir, "tcp-warden.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		t.Fatalf("expected tcp-warden.yaml to not exist initially")
+	}
+
+	plugins.EnsureBuildPrerequisites(tmpDir)
+
+	if _, err := os.Stat(yamlPath); err != nil {
+		t.Fatalf("expected tcp-warden.yaml to be restored by EnsureBuildPrerequisites, got error: %v", err)
+	}
+}
+
+func TestGetDefaultServiceForPlugin(t *testing.T) {
+	ftpDef := plugins.GetDefaultServiceForPlugin("ftp", []string{"ftp"}, nil)
+	if ftpDef == nil || ftpDef.Listen != ":2121" || ftpDef.Upstream != "127.0.0.1:21" {
+		t.Fatalf("expected ftp default service to map to :2121 -> 127.0.0.1:21, got: %+v", ftpDef)
+	}
+
+	pgDef := plugins.GetDefaultServiceForPlugin("postgres", []string{"postgres"}, nil)
+	if pgDef == nil || pgDef.Listen != ":5433" || pgDef.Upstream != "127.0.0.1:5432" {
+		t.Fatalf("expected postgres default service to map to :5433 -> 127.0.0.1:5432, got: %+v", pgDef)
+	}
+
+	redisDef := plugins.GetDefaultServiceForPlugin("redis", []string{"redis"}, nil)
+	if redisDef == nil || redisDef.Listen != ":6380" {
+		t.Fatalf("expected redis default service to map to :6380, got: %+v", redisDef)
+	}
+	if len(redisDef.PluginConfig) == 0 {
+		t.Fatalf("expected redis default service to include blocked_commands in PluginConfig")
+	}
+
+	customDef := plugins.GetDefaultServiceForPlugin("custom_proto", []string{"custom_proto"}, nil)
+	if customDef == nil || customDef.ServiceName != "custom_proto" {
+		t.Fatalf("expected custom plugin to generate fallback default service, got: %+v", customDef)
+	}
+}
+
+func TestCreatePlugin(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-create-plugin-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	targetDir := filepath.Join(tmpDir, "plugins", "foobar")
+	res, err := plugins.CreatePlugin(plugins.CreatePluginOptions{
+		Name:       "foobar",
+		Protocol:   "foobar",
+		Listen:     ":9999",
+		Upstream:   "127.0.0.1:9998",
+		TargetDir:  targetDir,
+		ProjectDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlugin failed: %v", err)
+	}
+
+	if res.Name != "foobar" {
+		t.Errorf("expected foobar, got %s", res.Name)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "plugin.yaml")); err != nil {
+		t.Errorf("expected plugin.yaml to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "plugin.go")); err != nil {
+		t.Errorf("expected plugin.go to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "inspector.go")); err != nil {
+		t.Errorf("expected inspector.go to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "foobar_test.go")); err != nil {
+		t.Errorf("expected foobar_test.go to exist: %v", err)
+	}
+}
+
+func TestInstallPlugin_CompilationFailureRejected(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-install-compile-fail-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockPluginDir := filepath.Join(tmpDir, "syntax_error_plugin")
+	_ = os.MkdirAll(mockPluginDir, 0755)
+
+	manifestContent := `name: syntax_error_plugin
+version: 1.0.0
+description: A plugin with compilation syntax errors
+protocols:
+  - syntax_err_proto
+`
+	_ = os.WriteFile(filepath.Join(mockPluginDir, "plugin.yaml"), []byte(manifestContent), 0644)
+
+	// Invalid Go code that will fail compilation
+	brokenGo := `package syntax_error_plugin
+
+func BrokenSyntax() {
+	this is not valid go code !!!
+}
+`
+	_ = os.WriteFile(filepath.Join(mockPluginDir, "plugin.go"), []byte(brokenGo), 0644)
+
+	targetPluginsDir := filepath.Join(tmpDir, "plugins")
+	_ = os.MkdirAll(filepath.Join(targetPluginsDir, "all"), 0755)
+	allGoPath := filepath.Join(targetPluginsDir, "all", "all.go")
+	_ = os.WriteFile(allGoPath, []byte("package all\n\nimport (\n)\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module github.com/routewarden/tcp-warden\n\ngo 1.22\n"), 0644)
+
+	opts := plugins.InstallOptions{
+		PluginsDir: targetPluginsDir,
+		ProjectDir: tmpDir,
+		NoBuild:    true,
+	}
+
+	_, err = plugins.InstallPlugin(mockPluginDir, opts)
+	if err == nil {
+		t.Fatalf("expected InstallPlugin to fail due to compilation error, but got nil")
+	}
+
+	// Verify all.go was NOT populated with the broken plugin
+	allContent, _ := os.ReadFile(allGoPath)
+	if strings.Contains(string(allContent), "syntax_error_plugin") {
+		t.Errorf("uncompilable plugin must NOT be registered in all.go: %s", string(allContent))
+	}
+
+	// Verify targetDir was cleaned up
+	installedTargetDir := filepath.Join(targetPluginsDir, "syntax_error_plugin")
+	if _, statErr := os.Stat(installedTargetDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected target directory to be removed on compilation failure, but it exists")
+	}
+}

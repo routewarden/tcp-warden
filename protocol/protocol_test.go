@@ -581,3 +581,76 @@ func TestTLSSNIProxyAllowedAndBlocked(t *testing.T) {
 	}
 }
 
+func TestTLSSNIProxy_MissingSNIWithAllowlist(t *testing.T) {
+	// ClientHello without SNI extension
+	chBody := []byte{0x03, 0x03}
+	chBody = append(chBody, make([]byte, 32)...) // random
+	chBody = append(chBody, 0)                   // session ID len
+	chBody = append(chBody, 0, 2, 0x00, 0x9c)    // ciphers
+	chBody = append(chBody, 1, 0)                // comp len 1, no comp
+	// No extensions
+
+	chLen := len(chBody)
+	hs := []byte{1, byte(chLen >> 16), byte(chLen >> 8), byte(chLen)}
+	hs = append(hs, chBody...)
+
+	recLen := len(hs)
+	record := []byte{0x16, 0x03, 0x01, byte(recLen >> 8), byte(recLen)}
+	fullTLS := append(record, hs...)
+
+	clientConn, proxyClientConn := net.Pipe()
+	proxyUpstreamConn, upstreamConn := net.Pipe()
+	defer clientConn.Close()
+	defer proxyClientConn.Close()
+	defer proxyUpstreamConn.Close()
+	defer upstreamConn.Close()
+
+	opts := TLSInspectorOptions{
+		AllowedDomains: []string{"example.com"},
+	}
+	proxy := NewTLSSNIProxy(proxyClientConn, proxyUpstreamConn, opts)
+
+	go func() {
+		clientConn.Write(fullTLS)
+		clientConn.Close()
+	}()
+
+	_, wasBlocked, reason := proxy.Run()
+	if !wasBlocked {
+		t.Errorf("expected connection without SNI to be blocked when AllowedDomains is enforced")
+	}
+	if !strings.Contains(reason, "missing SNI") {
+		t.Errorf("expected reason to contain 'missing SNI', got %q", reason)
+	}
+}
+
+type mockCloseWriterConn struct {
+	net.Conn
+	closedWrite bool
+}
+
+func (m *mockCloseWriterConn) CloseWrite() error {
+	m.closedWrite = true
+	return nil
+}
+
+func TestBufferedConn_CloseWrite(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	mock := &mockCloseWriterConn{Conn: c1}
+	bConn := &BufferedConn{
+		Reader: c1,
+		Conn:   mock,
+	}
+
+	if err := bConn.CloseWrite(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.closedWrite {
+		t.Errorf("expected CloseWrite to be forwarded to mockCloseWriterConn")
+	}
+}
+
+

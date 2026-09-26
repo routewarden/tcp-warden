@@ -20,12 +20,18 @@ func Proxy(client, upstream net.Conn) ProxyResult {
 	var bytesIn, bytesOut atomic.Int64
 	done := make(chan struct{}, 2)
 
+	type closeWriter interface {
+		CloseWrite() error
+	}
+
 	copy := func(dst, src net.Conn, counter *atomic.Int64) {
 		n, _ := io.Copy(dst, src)
 		counter.Add(n)
 		// Half-close: signal EOF to the other side
-		if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
+		if cw, ok := dst.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = dst.Close()
 		}
 		done <- struct{}{}
 	}
@@ -56,4 +62,12 @@ type BufferedConn struct {
 
 func (b *BufferedConn) Read(p []byte) (int, error) {
 	return b.Reader.Read(p)
+}
+
+// CloseWrite forwards half-close to the underlying Conn if supported.
+func (b *BufferedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }

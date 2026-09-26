@@ -315,13 +315,14 @@ func (r *Registry) Get(protocol string) (sdk.Plugin, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	nameKey, ok := r.protocolMap[strings.ToLower(protocol)]
+	key := strings.ToLower(protocol)
+	nameKey, ok := r.protocolMap[key]
 	if !ok {
-		return nil, false
+		nameKey = key
 	}
 
 	ent, ok := r.plugins[nameKey]
-	if !ok {
+	if !ok || ent == nil {
 		return nil, false
 	}
 	return ent.plugin, true

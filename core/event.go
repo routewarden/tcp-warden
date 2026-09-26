@@ -43,15 +43,23 @@ func (b *EventBus) Subscribe(bufSize int) (<-chan SecurityEvent, func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.closed {
+		ch := make(chan SecurityEvent)
+		close(ch)
+		return ch, func() {}
+	}
+
 	ch := make(chan SecurityEvent, bufSize)
 	b.subscribers[ch] = struct{}{}
 
 	unsubscribe := func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		if _, exists := b.subscribers[ch]; exists {
-			delete(b.subscribers, ch)
-			close(ch)
+		if b.subscribers != nil {
+			if _, exists := b.subscribers[ch]; exists {
+				delete(b.subscribers, ch)
+				close(ch)
+			}
 		}
 	}
 

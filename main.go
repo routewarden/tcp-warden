@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "1.0.2"
+	version = "1.0.3"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -119,11 +119,21 @@ func resolveConfigPath(customPath string) string {
 	if env := os.Getenv("ROUTEWARDEN_CONFIG"); env != "" {
 		return env
 	}
-	if _, err := os.Stat("tcp-warden.yaml"); err == nil {
-		return "tcp-warden.yaml"
+	// In containerized environments (where ROUTEWARDEN_SRC_DIR is set) or when /etc/routewarden is mounted:
+	// prioritize the mounted /etc/routewarden volume over local source tree copies
+	if os.Getenv("ROUTEWARDEN_SRC_DIR") != "" {
+		if _, err := os.Stat("/etc/routewarden/tcp-warden.yaml"); err == nil {
+			return "/etc/routewarden/tcp-warden.yaml"
+		}
+		if fi, err := os.Stat("/etc/routewarden"); err == nil && fi.IsDir() {
+			return "/etc/routewarden/tcp-warden.yaml"
+		}
 	}
 	if _, err := os.Stat("/etc/routewarden/tcp-warden.yaml"); err == nil {
 		return "/etc/routewarden/tcp-warden.yaml"
+	}
+	if _, err := os.Stat("tcp-warden.yaml"); err == nil {
+		return "tcp-warden.yaml"
 	}
 	if fi, err := os.Stat("/etc/routewarden"); err == nil && fi.IsDir() {
 		return "/etc/routewarden/tcp-warden.yaml"

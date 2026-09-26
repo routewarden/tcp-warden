@@ -26,5 +26,9 @@ Thumbs.db
 *.jsonl
 /logs
 
-# Plugin local cache
+# Plugin local cache and installed plugins
 .plugins_cache/
+/plugins/*
+!/plugins/all/
+!/plugins/sdk/
+!/plugins/*.go

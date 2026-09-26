@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 
-ARG VERSION=1.2.1
+ARG VERSION=1.0.0
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.version=${VERSION}" \
     -o /bin/tcp-warden .
@@ -16,7 +16,17 @@ FROM alpine:3.20
 
 # Install runtime dependencies including git and go for plugin pulling & test execution
 RUN apk --no-cache add ca-certificates tzdata git go
+RUN git config --global --add safe.directory "*"
+
 COPY --from=builder /bin/tcp-warden /usr/local/bin/tcp-warden
+
+# Copy source tree and Go module cache for dynamic plugin installation & compilation
+COPY --from=builder /src /usr/src/tcp-warden
+COPY --from=builder /go/pkg /go/pkg
+ENV GOPATH=/go
+ENV CGO_ENABLED=0
+ENV ROUTEWARDEN_SRC_DIR=/usr/src/tcp-warden
+WORKDIR /usr/src/tcp-warden
 
 # Directory structure for config, logs, and plugins cache
 RUN mkdir -p /etc/routewarden /var/log/routewarden /var/lib/routewarden/plugins

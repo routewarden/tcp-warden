@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "1.2.1"
+	version = "1.0.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -572,7 +572,7 @@ func handlePluginsEnable(args []string) {
 		os.Exit(1)
 	}
 
-	_ = plugins.SavePluginEnablement(".", name, true)
+	_ = plugins.SavePluginEnablement(plugins.ResolveProjectDir(""), name, true)
 	fmt.Printf("✓ Plugin %q is now ENABLED and ACTIVE.\n", name)
 
 	cfgPath := resolveConfigPath(*configPath)
@@ -602,7 +602,7 @@ func handlePluginsDisable(args []string) {
 		os.Exit(1)
 	}
 
-	_ = plugins.SavePluginEnablement(".", name, false)
+	_ = plugins.SavePluginEnablement(plugins.ResolveProjectDir(""), name, false)
 	fmt.Printf("✓ Plugin %q is now DISABLED.\n", name)
 
 	cfgPath := resolveConfigPath(*configPath)
@@ -630,7 +630,7 @@ func handlePluginsList() {
 	}
 
 	// 2. Sync runtime overrides from plugins.json if present (only for plugins not explicitly defined in YAML)
-	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement(plugins.ResolveProjectDir("")); err == nil {
 		for _, pe := range pEnabled {
 			if cfg == nil || !isPluginInEntries(cfg, pe) {
 				disabledList = removeFromList(disabledList, pe)

@@ -242,7 +242,7 @@ docker run -d \
   --network host \
   -v $(pwd)/tcp-warden.yaml:/etc/routewarden/tcp-warden.yaml:ro \
   -v /var/log/routewarden:/var/log/routewarden \
-  routewarden/tcp-warden:latest
+  ghcr.io/routewarden/tcp-warden:latest
 ```
 
 Or deploy alongside CrowdSec via `docker-compose.yml`:

@@ -14,6 +14,7 @@ import (
 
 	"github.com/routewarden/tcp-warden/plugins"
 	_ "github.com/routewarden/tcp-warden/plugins/all"
+	"github.com/routewarden/tcp-warden/plugins/sdk"
 )
 
 // Duration is a wrapper around time.Duration that supports YAML unmarshalling
@@ -359,6 +360,188 @@ func UpdatePluginEnablement(configPath string, pluginName string, enabled bool) 
 	}
 
 	return nil
+}
+
+// AddDefaultPluginService adds a default service entry to the given YAML configuration file
+// if a service for that protocol or name does not already exist.
+// Returns (added bool, serviceName string, err error).
+func AddDefaultPluginService(configPath string, pluginName string, defSvc *sdk.DefaultServiceConfig) (bool, string, error) {
+	if defSvc == nil {
+		defSvc = plugins.GetDefaultServiceForPlugin(pluginName, nil, nil)
+	}
+	if defSvc == nil {
+		return false, "", nil
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, "", fmt.Errorf("reading config file %s: %w", configPath, err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, "", fmt.Errorf("parsing YAML from %s: %w", configPath, err)
+	}
+
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return false, "", fmt.Errorf("invalid YAML document in %s", configPath)
+	}
+
+	topMap := root.Content[0]
+	if topMap.Kind != yaml.MappingNode {
+		return false, "", fmt.Errorf("expected root mapping in %s", configPath)
+	}
+
+	var servicesValNode *yaml.Node
+	for i := 0; i < len(topMap.Content); i += 2 {
+		if strings.EqualFold(topMap.Content[i].Value, "services") {
+			servicesValNode = topMap.Content[i+1]
+			break
+		}
+	}
+
+	if servicesValNode == nil {
+		keyNode := &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!str",
+			Value: "services",
+		}
+		newServicesMap := &yaml.Node{
+			Kind: yaml.MappingNode,
+			Tag:  "!!map",
+		}
+		topMap.Content = append(topMap.Content, keyNode, newServicesMap)
+		servicesValNode = newServicesMap
+	}
+
+	if servicesValNode.Kind != yaml.MappingNode {
+		return false, "", fmt.Errorf("expected services to be a mapping in %s", configPath)
+	}
+
+	svcName := defSvc.ServiceName
+	if svcName == "" {
+		svcName = pluginName
+	}
+	svcNameLower := strings.ToLower(svcName)
+	protoLower := strings.ToLower(defSvc.Protocol)
+	if protoLower == "" {
+		protoLower = strings.ToLower(pluginName)
+	}
+
+	// Check if a service with the same name OR same protocol already exists
+	for i := 0; i < len(servicesValNode.Content); i += 2 {
+		curKey := strings.ToLower(servicesValNode.Content[i].Value)
+		if curKey == svcNameLower {
+			return false, servicesValNode.Content[i].Value, nil // service already exists
+		}
+		curVal := servicesValNode.Content[i+1]
+		if curVal.Kind == yaml.MappingNode {
+			for j := 0; j < len(curVal.Content); j += 2 {
+				if strings.EqualFold(curVal.Content[j].Value, "protocol") {
+					if strings.EqualFold(curVal.Content[j+1].Value, protoLower) {
+						return false, servicesValNode.Content[i].Value, nil // protocol already configured
+					}
+				}
+			}
+		}
+	}
+
+	// Format servicesValNode as block style
+	servicesValNode.Style = 0
+
+	// Construct service node
+	serviceKeyNode := &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   "!!str",
+		Value: svcName,
+	}
+
+	serviceMapNode := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+	}
+
+	// listen
+	serviceMapNode.Content = append(serviceMapNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "listen"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: defSvc.Listen},
+	)
+
+	// upstream
+	serviceMapNode.Content = append(serviceMapNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "upstream"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: defSvc.Upstream},
+	)
+
+	// protocol
+	serviceMapNode.Content = append(serviceMapNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "protocol"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: protoLower},
+	)
+
+	// rate_limit
+	if defSvc.RateLimitCPM > 0 {
+		rateLimitMap := &yaml.Node{
+			Kind: yaml.MappingNode,
+			Tag:  "!!map",
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "connections_per_minute"},
+				{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(defSvc.RateLimitCPM)},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "burst"},
+				{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(defSvc.RateLimitBurst)},
+			},
+		}
+		serviceMapNode.Content = append(serviceMapNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "rate_limit"},
+			rateLimitMap,
+		)
+	}
+
+	// max_auth_failures
+	if defSvc.MaxAuthFailures > 0 {
+		serviceMapNode.Content = append(serviceMapNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "max_auth_failures"},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(defSvc.MaxAuthFailures)},
+		)
+	}
+
+	// ban_after_failures
+	if defSvc.BanAfterFailures > 0 {
+		serviceMapNode.Content = append(serviceMapNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "ban_after_failures"},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(defSvc.BanAfterFailures)},
+		)
+	}
+
+	// plugin_config
+	if len(defSvc.PluginConfig) > 0 {
+		cfgBytes, err := yaml.Marshal(defSvc.PluginConfig)
+		if err == nil {
+			var pCfgNode yaml.Node
+			if err := yaml.Unmarshal(cfgBytes, &pCfgNode); err == nil && len(pCfgNode.Content) > 0 {
+				serviceMapNode.Content = append(serviceMapNode.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "plugin_config"},
+					pCfgNode.Content[0],
+				)
+			}
+		}
+	}
+
+	servicesValNode.Content = append(servicesValNode.Content, serviceKeyNode, serviceMapNode)
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		return false, "", fmt.Errorf("encoding updated YAML: %w", err)
+	}
+	_ = enc.Close()
+
+	if err := os.WriteFile(configPath, buf.Bytes(), 0644); err != nil {
+		return false, "", fmt.Errorf("writing updated config to %s: %w", configPath, err)
+	}
+
+	return true, svcName, nil
 }
 
 // IsPluginEnabled checks if a plugin is explicitly enabled.

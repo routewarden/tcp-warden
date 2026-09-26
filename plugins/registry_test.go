@@ -3,6 +3,7 @@ package plugins_test
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/routewarden/tcp-warden/plugins"
@@ -149,4 +150,91 @@ func TestSDK_DefaultContext(t *testing.T) {
 	p1, p2 := net.Pipe()
 	p1.Close()
 	p2.Close()
+}
+
+func TestParseManifest(t *testing.T) {
+	yamlContent := `
+name: test_embed
+version: 1.2.3
+manifest_version: 1.0.0
+description: Embedded manifest test
+author: Test Author
+protocols:
+  - test_proto
+`
+	m := sdk.MustParseManifest([]byte(yamlContent))
+	if m.Name != "test_embed" {
+		t.Errorf("expected name test_embed, got %s", m.Name)
+	}
+	if m.Version != "1.2.3" {
+		t.Errorf("expected version 1.2.3, got %s", m.Version)
+	}
+	if m.ManifestVersion != "1.0.0" {
+		t.Errorf("expected manifest_version 1.0.0, got %s", m.ManifestVersion)
+	}
+	if len(m.Protocols) != 1 || m.Protocols[0] != "test_proto" {
+		t.Errorf("unexpected protocols: %v", m.Protocols)
+	}
+}
+
+func TestCompareVersions(t *testing.T) {
+	tests := []struct {
+		v1, v2 string
+		want   int
+	}{
+		{"1.0.0", "1.0.0", 0},
+		{"v1.0.0", "1.0.0", 0},
+		{"1.2.0", "1.1.0", 1},
+		{"1.1.0", "1.2.0", -1},
+		{"2.0.0", "1.9.9", 1},
+		{"1.0.0", "1.0.1", -1},
+		{"1.0", "1.0.0", 0},
+	}
+
+	for _, tt := range tests {
+		got := plugins.CompareVersions(tt.v1, tt.v2)
+		if got != tt.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.v1, tt.v2, got, tt.want)
+		}
+	}
+}
+
+type mockIncompatiblePlugin struct{}
+
+func (m *mockIncompatiblePlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{
+		Name:            "future-plugin",
+		Version:         "1.0.0",
+		Protocols:       []string{"future-proto"},
+		ManifestVersion: "99.0.0", // incompatible with current manifest version
+	}
+}
+func (m *mockIncompatiblePlugin) ValidateConfig(map[string]any) error { return nil }
+func (m *mockIncompatiblePlugin) CreateInspector(map[string]any) (sdk.Inspector, error) {
+	return nil, nil
+}
+func (m *mockIncompatiblePlugin) SelfTest() error { return nil }
+
+func TestPluginCompatibilityAndAutoDisable(t *testing.T) {
+	reg := plugins.NewRegistry()
+	incompat := &mockIncompatiblePlugin{}
+
+	// Registering an incompatible plugin should mark it as INCOMPATIBLE and DISABLED
+	reg.Register(incompat)
+
+	status, reason, _ := reg.GetStatus("future-plugin")
+	if status != plugins.StatusIncompatible {
+		t.Errorf("expected StatusIncompatible, got %s", status)
+	}
+	if !strings.Contains(reason, "incompatible manifest version") {
+		t.Errorf("expected reason to contain 'incompatible manifest version', got %s", reason)
+	}
+
+	// Attempting to enable it must fail and keep it disabled
+	if err := reg.Enable("future-plugin"); err == nil {
+		t.Fatalf("expected enabling incompatible plugin to fail, got nil")
+	}
+	if reg.IsActive("future-plugin") {
+		t.Errorf("expected future-plugin to remain inactive")
+	}
 }

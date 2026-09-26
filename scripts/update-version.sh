@@ -75,7 +75,14 @@ if [ -f "${ROOT_DIR}/main.go" ]; then
   UPDATED_COUNT=$((UPDATED_COUNT + 1))
 fi
 
-# 2. Update Dockerfile (ARG VERSION=X.Y.Z)
+# 2. Update plugins/sdk/sdk.go (const Version = "X.Y.Z", ManifestVersion is preserved)
+if [ -f "${ROOT_DIR}/plugins/sdk/sdk.go" ]; then
+  sed_inplace "s|(const[[:space:]]+Version[[:space:]]*=[[:space:]]*\")[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\")|\1${SEMVER_NO_V}\3|g" "${ROOT_DIR}/plugins/sdk/sdk.go"
+  echo "  ✓ Synchronized plugins/sdk/sdk.go"
+  UPDATED_COUNT=$((UPDATED_COUNT + 1))
+fi
+
+# 3. Update Dockerfile (ARG VERSION=X.Y.Z)
 if [ -f "${ROOT_DIR}/Dockerfile" ]; then
   sed_inplace "s|(ARG[[:space:]]+VERSION=)[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1${SEMVER_NO_V}|g" "${ROOT_DIR}/Dockerfile"
   echo "  ✓ Synchronized Dockerfile"

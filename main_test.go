@@ -62,3 +62,23 @@ func TestVersionMatchesJSON(t *testing.T) {
 		t.Errorf("main.go version (%q) does not match version.json (%q). Run ./scripts/update-version.sh", version, expected)
 	}
 }
+
+func TestResolveConfigPath(t *testing.T) {
+	// 1. Explicit custom path
+	if p := resolveConfigPath("/custom/path.yaml"); p != "/custom/path.yaml" {
+		t.Errorf("expected /custom/path.yaml, got %s", p)
+	}
+
+	// 2. ROUTEWARDEN_CONFIG env var
+	t.Setenv("ROUTEWARDEN_CONFIG", "/env/path.yaml")
+	if p := resolveConfigPath(""); p != "/env/path.yaml" {
+		t.Errorf("expected /env/path.yaml, got %s", p)
+	}
+	t.Setenv("ROUTEWARDEN_CONFIG", "")
+
+	// 3. Local fallback when no env var and no container dir
+	if p := resolveConfigPath(""); p != "tcp-warden.yaml" {
+		t.Errorf("expected tcp-warden.yaml, got %s", p)
+	}
+}
+

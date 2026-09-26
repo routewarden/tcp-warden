@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
+	"github.com/routewarden/tcp-warden/geoip"
 	"github.com/routewarden/tcp-warden/plugins"
 	"github.com/routewarden/tcp-warden/plugins/sdk"
 	"github.com/routewarden/tcp-warden/protocol"
@@ -105,6 +106,104 @@ func TestFailureTrackerAndAutoBan(t *testing.T) {
 	cAfter := ft.RecordFailure("ssh", "192.0.2.5", 1*time.Minute)
 	if cAfter != 1 {
 		t.Errorf("expected 1 failure count after reset, got %d", cAfter)
+	}
+}
+
+func TestPipeline_AutoBanOnMaxAuthFailures(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		Global: config.GlobalConfig{
+			BanDuration: config.Duration(1 * time.Hour),
+		},
+		Services: map[string]config.ServiceConfig{
+			"auth-svc": {
+				Name:            "auth-svc",
+				Protocol:        "tcp",
+				MaxAuthFailures: 3,
+				BanDuration:     config.Duration(2 * time.Hour),
+				Response: config.ResponseConfig{
+					Mode: "drop",
+				},
+			},
+		},
+	}
+
+	bl := NewBanList("")
+	ft := NewFailureTracker()
+	rl := NewRateLimiter()
+	bus := NewEventBus()
+	stats := NewStatsRegistry()
+
+	pipe := NewPipeline(cfg, bl, ft, rl, bus, stats, nil, nil)
+	svc := cfg.Services["auth-svc"]
+	clientIP := "203.0.113.50"
+
+	// 1. Initial state: not banned
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned initially", clientIP)
+	}
+
+	// 2. Record 1st failure -> count = 1, threshold = 3 -> not banned
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned after 1 failure", clientIP)
+	}
+
+	// 3. Record 2nd failure -> count = 2, threshold = 3 -> not banned
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned after 2 failures", clientIP)
+	}
+
+	// 4. Record 3rd failure -> count = 3, threshold = 3 -> MUST BE BANNED!
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	entry, isBanned := bl.IsBanned(clientIP)
+	if !isBanned {
+		t.Fatalf("expected client %s to be automatically banned after reaching MaxAuthFailures", clientIP)
+	}
+	if !strings.Contains(entry.Reason, "max_auth_failures_exceeded") {
+		t.Errorf("unexpected ban reason: %s", entry.Reason)
+	}
+	if entry.Service != "auth-svc" {
+		t.Errorf("expected banned service to be 'auth-svc', got %s", entry.Service)
+	}
+
+	// 5. Subsequent connection from banned IP is caught at Stage 2
+	connA, connB := net.Pipe()
+	defer connA.Close()
+	defer connB.Close()
+
+	// Wrap connB with mock address
+	mockConn := &mockAddrConn{Conn: connB, remoteIP: clientIP}
+
+	done := make(chan struct{})
+	go func() {
+		pipe.Handle(context.Background(), mockConn, &svc)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Connection handled and dropped
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for pipeline to drop banned connection")
+	}
+
+	st := stats.GetOrCreate("auth-svc")
+	if st.Snapshot().BlockedConnections == 0 {
+		t.Errorf("expected blocked connection count to increment for banned IP")
+	}
+}
+
+type mockAddrConn struct {
+	net.Conn
+	remoteIP string
+}
+
+func (m *mockAddrConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{
+		IP:   net.ParseIP(m.remoteIP),
+		Port: 54321,
 	}
 }
 

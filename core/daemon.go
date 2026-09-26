@@ -2,10 +2,13 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/routewarden/tcp-warden/config"
 	"github.com/routewarden/tcp-warden/crowdsec"
@@ -27,18 +30,58 @@ type Daemon struct {
 	pipeline  *Pipeline
 	apiServer *APIServer
 
-	listeners map[string]net.Listener
+	listeners []net.Listener
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 }
 
 // NewDaemon initializes a Daemon instance from configuration.
 func NewDaemon(cfg *config.Config) (*Daemon, error) {
-	// 1. Run self-tests for all modular plugins before accepting connections
-	pluginResults := plugins.RunSelfTests()
-	for name, res := range pluginResults {
-		if !res.Passed {
-			log.Printf("⚠️  [PLUGIN] %s self-test FAILED and is DISABLED: %v", name, res.Error)
+	// 0. Sync plugins declared with a source in configuration (using cache or pulling fresh)
+	for name, entry := range cfg.Plugins.Entries {
+		if entry.Source != "" {
+			res, err := plugins.SyncPluginFromSource(name, entry.Source, plugins.InstallOptions{
+				NoBuild: true,
+			})
+			if err != nil {
+				log.Printf("⚠️  [PLUGIN SYNC] Failed syncing plugin %q from %s: %v", name, entry.Source, err)
+			} else if !res.TestPassed {
+				log.Printf("⚠️  [PLUGIN SYNC] Plugin %q tests FAILED; plugin remains DISABLED", name)
+			}
+		}
+	}
+
+	// 1. Apply configured plugin enablement (pre-shipped non-standard plugins disabled by default)
+	enabledList := append([]string(nil), cfg.Plugins.Enabled...)
+	disabledList := append([]string(nil), cfg.Plugins.Disabled...)
+
+	if pEnabled, pDisabled, err := plugins.GetPluginEnablement("."); err == nil {
+		for _, pe := range pEnabled {
+			if _, exists := cfg.Plugins.Entries[pe]; !exists {
+				disabledList = removeFromList(disabledList, pe)
+				if !contains(enabledList, pe) {
+					enabledList = append(enabledList, pe)
+				}
+			}
+		}
+		for _, pd := range pDisabled {
+			if _, exists := cfg.Plugins.Entries[pd]; !exists {
+				enabledList = removeFromList(enabledList, pd)
+				if !contains(disabledList, pd) {
+					disabledList = append(disabledList, pd)
+				}
+			}
+		}
+	}
+
+	pluginErrs := plugins.ApplyConfiguration(enabledList, disabledList)
+	for name, err := range pluginErrs {
+		log.Printf("⚠️  [PLUGIN] %q self-test FAILED and remains DISABLED: %v", name, err)
+	}
+
+	for _, pInfo := range plugins.List() {
+		if pInfo.Enabled && pInfo.Status == plugins.StatusActive {
+			log.Printf("✓  [PLUGIN] %s (%s) is ACTIVE and healthy", pInfo.Name, pInfo.Version)
 		}
 	}
 
@@ -50,9 +93,9 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 				// Standard protocol
 			default:
 				if !plugins.IsActive(svc.Protocol) {
-					st, testErr := plugins.GetStatus(svc.Protocol)
-					log.Printf("⚠️  [WARN] Service %q uses protocol %q, but plugin is %s (reason: %v). Inbound connections will be rejected.",
-						name, svc.Protocol, st, testErr)
+					st, reason, testErr := plugins.GetStatus(svc.Protocol)
+					log.Printf("⚠️  [WARN] Service %q uses protocol %q, but plugin is %s (%s: %v). Inbound connections will be rejected.",
+						name, svc.Protocol, st, reason, testErr)
 				}
 			}
 		}
@@ -61,7 +104,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	// Initialize GeoIP if DB path configured
 	geoip.InitGeoIP(cfg.Global.GeoIPDB)
 
-	bl := NewBanList()
+	bl := NewBanList(cfg.Global.DataDir)
 	ft := NewFailureTracker()
 	rl := NewRateLimiter()
 	stats := NewStatsRegistry()
@@ -104,7 +147,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 		crowdsec:  cs,
 		pipeline:  pipe,
 		apiServer: apiSrv,
-		listeners: make(map[string]net.Listener),
+		listeners: make([]net.Listener, 0),
 	}, nil
 }
 
@@ -126,24 +169,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 
-	// 3. Start listeners for all enabled services
+	// 3. Start listeners for all enabled services (including port ranges)
 	for name, svc := range d.cfg.Services {
 		if !svc.IsEnabled() {
 			continue
 		}
 
-		ln, err := net.Listen("tcp", svc.Listen)
+		lHost, ports, err := svc.ListenPorts()
 		if err != nil {
 			d.Stop()
-			return fmt.Errorf("starting listener for service %q on %s: %w", name, svc.Listen, err)
+			return fmt.Errorf("parsing listen address for service %q (%s): %w", name, svc.Listen, err)
 		}
 
-		d.mu.Lock()
-		d.listeners[name] = ln
-		d.mu.Unlock()
+		for _, port := range ports {
+			listenAddr := config.FormatHostPort(lHost, port)
+			ln, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				d.Stop()
+				return fmt.Errorf("starting listener for service %q on %s: %w", name, listenAddr, err)
+			}
 
-		d.wg.Add(1)
-		go d.serveService(ctx, ln, svc)
+			d.mu.Lock()
+			d.listeners = append(d.listeners, ln)
+			d.mu.Unlock()
+
+			d.wg.Add(1)
+			go d.serveService(ctx, ln, svc)
+		}
 	}
 
 	// Wait for context cancellation
@@ -164,7 +216,14 @@ func (d *Daemon) serveService(ctx context.Context, ln net.Listener, svc config.S
 			case <-ctx.Done():
 				return
 			default:
-				return
+				// Fatal: listener was deliberately closed.
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				// Transient OS error (e.g. "too many open files") — log and retry.
+				log.Printf("⚠️  [%s] Accept error (retrying in 100ms): %v", svc.Name, err)
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 		}
 
@@ -180,13 +239,19 @@ func (d *Daemon) Stop() {
 	for _, ln := range d.listeners {
 		ln.Close()
 	}
-	d.listeners = make(map[string]net.Listener)
+	d.listeners = nil
 
 	if d.apiServer != nil {
 		d.apiServer.Close()
 	}
 	if d.crowdsec != nil {
 		d.crowdsec.Stop()
+	}
+	if d.limiter != nil {
+		d.limiter.Stop()
+	}
+	if d.failures != nil {
+		d.failures.Stop()
 	}
 	if d.banlist != nil {
 		d.banlist.Close()
@@ -198,3 +263,23 @@ func (d *Daemon) Stop() {
 		d.logger.Close()
 	}
 }
+
+func contains(list []string, item string) bool {
+	for _, s := range list {
+		if strings.EqualFold(s, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeFromList(list []string, item string) []string {
+	var res []string
+	for _, s := range list {
+		if !strings.EqualFold(s, item) {
+			res = append(res, s)
+		}
+	}
+	return res
+}
+

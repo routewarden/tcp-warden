@@ -57,9 +57,16 @@ func NewAPIServer(
 	}
 
 	// Routes
-	mux.HandleFunc("/health", api.handleHealth)
-	mux.HandleFunc("/api/tcp/health", api.handleHealth)
-	mux.HandleFunc("/api/guard/health", api.handleHealth)
+	// /ping is a minimal unauthenticated liveness check (no sensitive data).
+	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	// /health exposes version, ban count, and CrowdSec decision count — require auth if configured.
+	mux.HandleFunc("/health", wrapAuth(api.handleHealth))
+	mux.HandleFunc("/api/tcp/health", wrapAuth(api.handleHealth))
+	mux.HandleFunc("/api/guard/health", wrapAuth(api.handleHealth))
 
 	mux.HandleFunc("/api/stats", wrapAuth(api.handleStats))
 	mux.HandleFunc("/api/guard/stats", wrapAuth(api.handleStats))

@@ -1,9 +1,0 @@
-name: mysql
-version: 1.0.0
-description: MySQL and MariaDB wire protocol inspector detecting authentication failures and SSL handshakes
-author: RouteWarden Team
-protocols:
-  - mysql
-  - mariadb
-config:
-  max_auth_failures: 5

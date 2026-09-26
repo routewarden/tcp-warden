@@ -1,9 +1,0 @@
-name: postgres
-version: 1.0.0
-description: PostgreSQL wire protocol inspector with credential stuffing detection and SSL handling
-author: RouteWarden Team
-protocols:
-  - postgres
-  - postgresql
-config:
-  max_auth_failures: 5

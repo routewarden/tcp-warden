@@ -64,44 +64,45 @@ func TestPluginRegistry_SelfTestingAndAutoDisable(t *testing.T) {
 	reg.Register(healthy)
 	reg.Register(faulty)
 
-	// Before running self-tests, status should be PENDING
-	st, _ := reg.GetStatus("healthy-plugin")
-	if st != plugins.StatusPending {
-		t.Fatalf("expected PENDING, got %v", st)
+	// Before enabling, status should be DISABLED (disabled by default)
+	st, reason, _ := reg.GetStatus("healthy-plugin")
+	if st != plugins.StatusDisabled || reason != "disabled by default" {
+		t.Fatalf("expected DISABLED by default, got %v (%s)", st, reason)
 	}
 
-	results := reg.RunSelfTests()
-
-	// Verify healthy plugin
-	hRes, ok := results["healthy-plugin"]
-	if !ok || !hRes.Passed {
-		t.Fatalf("expected healthy plugin to pass self-test, got %+v", hRes)
+	// Explicitly enable healthy plugin (runs self-test)
+	if err := reg.Enable("healthy-plugin"); err != nil {
+		t.Fatalf("expected healthy-plugin to enable successfully: %v", err)
 	}
 	if !reg.IsActive("healthy-plugin") {
-		t.Errorf("healthy-plugin should be active")
-	}
-	if !reg.IsActive("healthy-proto") {
-		t.Errorf("healthy-proto should be active")
+		t.Errorf("healthy-plugin should be active after enable")
 	}
 
-	// Verify faulty plugin is auto-disabled
-	fRes, ok := results["faulty-plugin"]
-	if !ok || fRes.Passed {
-		t.Fatalf("expected faulty plugin to fail self-test, got %+v", fRes)
+	// Attempting to enable faulty plugin should return error and remain disabled
+	if err := reg.Enable("faulty-plugin"); err == nil {
+		t.Errorf("expected enable faulty-plugin to return error")
 	}
 	if reg.IsActive("faulty-plugin") {
 		t.Errorf("faulty-plugin should NOT be active")
 	}
-	if reg.IsActive("faulty-proto") {
-		t.Errorf("faulty-proto should NOT be active")
-	}
 
-	status, err := reg.GetStatus("faulty-proto")
+	status, reason, err := reg.GetStatus("faulty-proto")
 	if status != plugins.StatusDisabled {
 		t.Errorf("expected StatusDisabled, got %v", status)
 	}
+	if reason != "self-test failed" {
+		t.Errorf("expected reason self-test failed, got %s", reason)
+	}
 	if err == nil || err.Error() != "synthetic self-test failure: handshake assertion failed" {
 		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Test Disable
+	if err := reg.Disable("healthy-plugin", "admin disabled"); err != nil {
+		t.Fatal(err)
+	}
+	if reg.IsActive("healthy-plugin") {
+		t.Errorf("healthy-plugin should be inactive after disable")
 	}
 
 	// Verify List

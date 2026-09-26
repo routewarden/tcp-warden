@@ -46,7 +46,7 @@ RUN addgroup -g 1000 -S routewarden && \
 ENV ROUTEWARDEN_PLUGINS_CACHE=/var/lib/routewarden/plugins
 ENV ROUTEWARDEN_CONFIG=/etc/routewarden/tcp-warden.yaml
 
-VOLUME ["/etc/routewarden", "/var/lib/routewarden/plugins", "/var/log/routewarden"]
+VOLUME ["/etc/routewarden", "/var/lib/routewarden", "/var/log/routewarden"]
 
 EXPOSE 9091 2222 2525 1110 1143
 

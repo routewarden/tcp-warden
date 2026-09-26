@@ -301,6 +301,29 @@ func UpdatePluginEnablement(configPath string, pluginName string, enabled bool) 
 			targetPluginNode.Value = boolStr
 			targetPluginNode.Tag = "!!bool"
 		}
+
+		// Prune conflicting plugin entries from any child "disabled" or "enabled" lists
+		for i := 0; i < len(pluginsValNode.Content); i += 2 {
+			k := strings.ToLower(pluginsValNode.Content[i].Value)
+			val := pluginsValNode.Content[i+1]
+			if k == "disabled" && val.Kind == yaml.SequenceNode && enabled {
+				var pruned []*yaml.Node
+				for _, item := range val.Content {
+					if !strings.EqualFold(item.Value, pluginNameLower) {
+						pruned = append(pruned, item)
+					}
+				}
+				val.Content = pruned
+			} else if k == "enabled" && val.Kind == yaml.SequenceNode && !enabled {
+				var pruned []*yaml.Node
+				for _, item := range val.Content {
+					if !strings.EqualFold(item.Value, pluginNameLower) {
+						pruned = append(pruned, item)
+					}
+				}
+				val.Content = pruned
+			}
+		}
 	} else if pluginsValNode.Kind == yaml.SequenceNode {
 		// List format
 		var newSeq []*yaml.Node

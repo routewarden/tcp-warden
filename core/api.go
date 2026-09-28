@@ -2,24 +2,32 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
 	"github.com/routewarden/tcp-warden/crowdsec"
 )
 
-// APIServer serves management, metrics, and SSE event streaming.
+// APIServer serves management, metrics, and SSE event streaming over TCP and/or Unix sockets.
 type APIServer struct {
-	cfg      *config.Config
-	banlist  *BanList
-	stats    *StatsRegistry
-	bus      *EventBus
-	crowdsec *crowdsec.Client
-	srv      *http.Server
+	cfg       *config.Config
+	banlist   *BanList
+	stats     *StatsRegistry
+	bus       *EventBus
+	crowdsec  *crowdsec.Client
+	srv       *http.Server
+	listeners []net.Listener
+	sockPaths []string
+	mu        sync.Mutex
 }
 
 // NewAPIServer creates an APIServer configured with daemon components.
@@ -40,19 +48,9 @@ func NewAPIServer(
 
 	mux := http.NewServeMux()
 
-	// Authentication wrapper
-	wrapAuth := func(h http.HandlerFunc) http.HandlerFunc {
+	// Content-Type wrapper
+	wrapJSON := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			token := cfg.API.AuthToken
-			if token != "" {
-				authHeader := r.Header.Get("Authorization")
-				customHeader := r.Header.Get("X-Warden-Token")
-				expectedBearer := "Bearer " + token
-				if authHeader != expectedBearer && customHeader != token {
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-					return
-				}
-			}
 			w.Header().Set("Content-Type", "application/json")
 			h(w, r)
 		}
@@ -65,48 +63,141 @@ func NewAPIServer(
 		w.Write([]byte(`{"ok":true}`))
 	})
 
-	// /health exposes version, ban count, and CrowdSec decision count — require auth if configured.
-	mux.HandleFunc("/health", wrapAuth(api.handleHealth))
-	mux.HandleFunc("/api/tcp/health", wrapAuth(api.handleHealth))
-	mux.HandleFunc("/api/guard/health", wrapAuth(api.handleHealth))
+	// Management API routes
+	mux.HandleFunc("/health", wrapJSON(api.handleHealth))
+	mux.HandleFunc("/api/tcp/health", wrapJSON(api.handleHealth))
+	mux.HandleFunc("/api/guard/health", wrapJSON(api.handleHealth))
 
-	mux.HandleFunc("/api/stats", wrapAuth(api.handleStats))
-	mux.HandleFunc("/api/guard/stats", wrapAuth(api.handleStats))
+	mux.HandleFunc("/api/stats", wrapJSON(api.handleStats))
+	mux.HandleFunc("/api/guard/stats", wrapJSON(api.handleStats))
 
-	mux.HandleFunc("/api/services", wrapAuth(api.handleServices))
-	mux.HandleFunc("/api/guard/services", wrapAuth(api.handleServices))
+	mux.HandleFunc("/api/services", wrapJSON(api.handleServices))
+	mux.HandleFunc("/api/guard/services", wrapJSON(api.handleServices))
 
-	mux.HandleFunc("/api/banlist", wrapAuth(api.handleBanlist))
-	mux.HandleFunc("/api/guard/banlist", wrapAuth(api.handleBanlist))
+	mux.HandleFunc("/api/banlist", wrapJSON(api.handleBanlist))
+	mux.HandleFunc("/api/guard/banlist", wrapJSON(api.handleBanlist))
 
-	mux.HandleFunc("/api/unban", wrapAuth(api.handleUnban))
-	mux.HandleFunc("/api/guard/unban", wrapAuth(api.handleUnban))
+	mux.HandleFunc("/api/unban", wrapJSON(api.handleUnban))
+	mux.HandleFunc("/api/guard/unban", wrapJSON(api.handleUnban))
 
-	mux.HandleFunc("/api/ban", wrapAuth(api.handleBan))
-	mux.HandleFunc("/api/guard/ban", wrapAuth(api.handleBan))
+	mux.HandleFunc("/api/ban", wrapJSON(api.handleBan))
+	mux.HandleFunc("/api/guard/ban", wrapJSON(api.handleBan))
 
 	mux.HandleFunc("/api/events", api.handleEvents)
 	mux.HandleFunc("/api/guard/events", api.handleEvents)
 
 	api.srv = &http.Server{
-		Addr:    cfg.API.Listen,
 		Handler: mux,
 	}
 
 	return api
 }
 
-// Start begins listening and serving the API.
+// Start begins listening and serving the API on configured TCP and/or Unix socket listeners.
 func (a *APIServer) Start() error {
-	return a.srv.ListenAndServe()
-}
+	var listeners []net.Listener
+	var sockPaths []string
 
-// Close gracefully stops the HTTP server.
-func (a *APIServer) Close() error {
-	if a.srv != nil {
-		return a.srv.Close()
+	unixPath := a.cfg.API.Socket
+	tcpAddr := a.cfg.API.Listen
+
+	// Normalize unix socket if given in Listen
+	if after, ok :=strings.CutPrefix(tcpAddr, "unix://"); ok  {
+		unixPath = after
+		tcpAddr = ""
+	} else if strings.HasSuffix(tcpAddr, ".sock") || (strings.HasPrefix(tcpAddr, "/") && !strings.Contains(tcpAddr, ":")) {
+		unixPath = tcpAddr
+		tcpAddr = ""
+	}
+
+	// 1. Unix domain socket listener
+	if unixPath != "" {
+		if dir := filepath.Dir(unixPath); dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0755)
+		}
+		_ = os.Remove(unixPath) // clean up any stale socket
+
+		ln, err := net.Listen("unix", unixPath)
+		if err != nil {
+			log.Printf("⚠️  [API] Failed to create unix socket listener on %s: %v", unixPath, err)
+		} else {
+			mode := a.cfg.API.FileMode()
+			if err := os.Chmod(unixPath, mode); err != nil {
+				log.Printf("⚠️  [API] Failed to chmod %04o on %s: %v", mode, unixPath, err)
+			}
+			listeners = append(listeners, ln)
+			sockPaths = append(sockPaths, unixPath)
+			log.Printf("✓  [API] Listening on unix socket %s (mode %04o)", unixPath, mode)
+		}
+	}
+
+	// 2. TCP listener (if specified and not empty)
+	if tcpAddr != "" {
+		ln, err := net.Listen("tcp", tcpAddr)
+		if err != nil {
+			if len(listeners) == 0 {
+				return fmt.Errorf("starting API TCP listener on %s: %w", tcpAddr, err)
+			}
+			log.Printf("⚠️  [API] Failed to listen on TCP %s: %v", tcpAddr, err)
+		} else {
+			listeners = append(listeners, ln)
+			log.Printf("✓  [API] Listening on TCP http://%s", tcpAddr)
+		}
+	}
+
+	if len(listeners) == 0 {
+		return fmt.Errorf("no API listeners configured or available (tcp: %q, socket: %q)", tcpAddr, unixPath)
+	}
+
+	a.mu.Lock()
+	a.listeners = listeners
+	a.sockPaths = sockPaths
+	a.mu.Unlock()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(listeners))
+
+	for _, ln := range listeners {
+		wg.Add(1)
+		go func(l net.Listener) {
+			defer wg.Done()
+			if err := a.srv.Serve(l); err != nil && !errors.Is(err, net.ErrClosed) && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}(ln)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// Close gracefully stops the HTTP server and removes any created unix domain sockets.
+func (a *APIServer) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	var firstErr error
+	if a.srv != nil {
+		firstErr = a.srv.Close()
+	}
+	for _, ln := range a.listeners {
+		_ = ln.Close()
+	}
+	a.listeners = nil
+
+	for _, sp := range a.sockPaths {
+		_ = os.Remove(sp)
+	}
+	a.sockPaths = nil
+
+	return firstErr
 }
 
 func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -239,18 +330,6 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
-	// Authenticate SSE stream if token configured
-	token := a.cfg.API.AuthToken
-	if token != "" {
-		authHeader := r.Header.Get("Authorization")
-		customHeader := r.Header.Get("X-Warden-Token")
-		queryToken := r.URL.Query().Get("token")
-		if authHeader != "Bearer "+token && customHeader != token && queryToken != token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

@@ -96,7 +96,6 @@ global:
 api:
   enabled: true
   listen: "127.0.0.1:9091"
-  auth_token: ""
 
 crowdsec:
   enabled: true

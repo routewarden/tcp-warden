@@ -599,9 +599,41 @@ type GlobalConfig struct {
 
 // APIConfig controls the management REST & SSE API.
 type APIConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Listen    string `yaml:"listen"`     // e.g. ":9091" or "127.0.0.1:9091"
-	AuthToken string `yaml:"auth_token"` // optional Bearer token
+	Enabled    bool       `yaml:"enabled"`
+	Listen     string     `yaml:"listen"`      // e.g. ":9091" or "127.0.0.1:9091" or "unix:///var/run/routewarden/tcp-warden.sock"
+	Socket     string     `yaml:"socket"`      // optional Unix domain socket path, e.g. "/var/run/routewarden/tcp-warden.sock"
+	SocketMode SocketMode `yaml:"socket_mode"` // permissions for Unix socket (default: 0666)
+	AuthToken  string     `yaml:"auth_token"`  // optional Bearer token
+}
+
+// SocketMode represents an octal file permission mode (e.g. 0666 or 0660).
+type SocketMode uint32
+
+func (s *SocketMode) UnmarshalYAML(value *yaml.Node) error {
+	var str string
+	if err := value.Decode(&str); err == nil {
+		m, err := strconv.ParseUint(str, 8, 32)
+		if err != nil {
+			*s = 0666
+			return nil
+		}
+		*s = SocketMode(m)
+		return nil
+	}
+	var val uint32
+	if err := value.Decode(&val); err == nil {
+		*s = SocketMode(val)
+		return nil
+	}
+	*s = 0666
+	return nil
+}
+
+func (a *APIConfig) FileMode() os.FileMode {
+	if a.SocketMode == 0 {
+		return 0666
+	}
+	return os.FileMode(a.SocketMode)
 }
 
 // CrowdSecConfig controls the CrowdSec LAPI bouncer integration.

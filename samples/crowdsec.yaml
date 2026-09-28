@@ -1,0 +1,59 @@
+# ==============================================================================
+# RouteWarden TCP Warden - CrowdSec LAPI Bouncer Integration Sample
+# ==============================================================================
+# Integrates TCP Warden as a native high-performance Layer 4 bouncer for CrowdSec.
+#
+# When enabled, TCP Warden polls CrowdSec Local API (LAPI) decisions and drops
+# incoming malicious connections in microseconds before any Layer 7 protocol
+# parsing or upstream backend forwarding occurs.
+#
+# Generate a bouncer API key with:
+#   cscli bouncers add tcp-warden
+# ==============================================================================
+
+version: "1.0"
+
+global:
+  max_connections: 25000
+  ban_duration: "1h"
+  ban_after_failures: 3
+  tarpit_ms: 1500
+  log_level: "info"
+  log_file: "/var/log/routewarden/crowdsec-bouncer.jsonl"
+  data_dir: "/var/lib/routewarden"
+
+api:
+  enabled: true
+  listen: "127.0.0.1:9091"
+
+# ------------------------------------------------------------------------------
+# CrowdSec Local API (LAPI) Configuration
+# ------------------------------------------------------------------------------
+crowdsec:
+  enabled: true
+  lapi_url: "http://127.0.0.1:8080"
+  api_key: "${CROWDSEC_BOUNCER_KEY}"
+  update_frequency: "10s"      # Poll decisions every 10 seconds
+  include_scenarios_containing: [] # Optional: filter specific scenario decisions
+  exclude_scenarios_containing: []
+
+services:
+  # Protect your external SSH ingress with global CrowdSec community threat intelligence
+  ssh_bastion:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+    protocol: "ssh"
+    max_auth_failures: 3
+    ban_after_failures: 3
+    ban_duration: "2h"
+    response:
+      mode: "drop"             # Silently drop packets from CrowdSec-flagged IPs
+
+  # Protect public mail submission port
+  smtp_ingress:
+    listen: ":2525"
+    upstream: "127.0.0.1:25"
+    protocol: "smtp"
+    response:
+      mode: "reject"
+      reject_message: "554 5.7.1 Blocked by CrowdSec IP reputation intelligence"

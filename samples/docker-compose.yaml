@@ -1,0 +1,90 @@
+# ==============================================================================
+# RouteWarden TCP Warden - Local Testing Docker Compose Stack
+# ==============================================================================
+# Spins up:
+# 1. postgres-backend: Test PostgreSQL server
+# 2. redis-backend:    Test Redis server
+# 3. tcp-warden:       L4 firewall & proxy inspecting ports 5432 & 6379
+# 4. rwarden-ui:       RouteWarden dashboard with live TCP Warden view
+#
+# Quick start:
+#   docker compose -f samples/docker-compose.test.yaml up -d
+#
+# Open dashboard:
+#   http://localhost:9090
+#
+# Test PostgreSQL auto-ban:
+#   PGPASSWORD=wrong psql -h localhost -p 5432 -U testuser testdb
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # Backend Services to Protect
+  # ----------------------------------------------------------------------------
+  postgres-backend:
+    image: postgres:16-alpine
+    container_name: test-postgres-backend
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: secretpassword123
+      POSTGRES_DB: testdb
+    networks:
+      - internal-net
+    # Do NOT expose port directly to host — traffic MUST go through tcp-warden!
+    restart: unless-stopped
+
+  redis-backend:
+    image: redis:7-alpine
+    container_name: test-redis-backend
+    networks:
+      - internal-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # TCP Warden L4 Firewall & Proxy
+  # ----------------------------------------------------------------------------
+  tcp-warden:
+    image: ghcr.io/routewarden/tcp-warden:latest
+    container_name: test-tcp-warden
+    ports:
+      # Public listener ports (protected by TCP Warden)
+      - "5432:5432"   # PostgreSQL Bastion
+      - "6379:6379"   # Redis Guard
+      - "2222:2222"   # SSH Guard
+      - "9091:9091"   # Management API
+    volumes:
+      - ./local-test.yaml:/etc/routewarden/tcp-warden.yaml:ro
+      - tcp-warden-data:/var/lib/routewarden
+    networks:
+      - internal-net
+      - public-net
+    restart: unless-stopped
+    depends_on:
+      - postgres-backend
+      - redis-backend
+
+  # ----------------------------------------------------------------------------
+  # RouteWarden Dashboard UI
+  # ----------------------------------------------------------------------------
+  rwarden-ui:
+    image: ghcr.io/routewarden/routewarden:latest
+    container_name: test-rwarden-dashboard
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "9090", "--tcp-warden", "http://tcp-warden:9091", "--no-docker"]
+    ports:
+      - "9090:9090"
+    networks:
+      - public-net
+    restart: unless-stopped
+    depends_on:
+      - tcp-warden
+
+networks:
+  internal-net:
+    driver: bridge
+  public-net:
+    driver: bridge
+
+volumes:
+  tcp-warden-data:

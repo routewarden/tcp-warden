@@ -25,7 +25,9 @@ global:
 api:
   enabled: true
   listen: "127.0.0.1:9091"
-  auth_token: ""
+  # Optional Unix domain socket for local IPC (avoids exposing TCP ports or container port-mapping):
+  socket: "/var/run/routewarden/tcp-warden.sock"
+  socket_mode: "0666"
 # CrowdSec LAPI Bouncer integration
 crowdsec:
   enabled: false

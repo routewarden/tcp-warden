@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "1.1.0"
+	version = "1.1.1"
 	commit  = "none"
 	date    = "unknown"
 )

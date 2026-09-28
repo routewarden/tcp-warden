@@ -1000,7 +1000,10 @@ func applyDefaults(cfg *Config) {
 		cfg.Global.DataDir = "/var/lib/routewarden"
 	}
 
-	if cfg.API.Listen == "" {
+	// Only apply the TCP listen default when no socket is configured either.
+	// If the user sets only api.socket, leave api.listen empty so the daemon
+	// doesn't bind an unexpected TCP port.
+	if cfg.API.Listen == "" && cfg.API.Socket == "" {
 		cfg.API.Listen = "127.0.0.1:9091"
 	}
 

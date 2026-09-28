@@ -102,7 +102,7 @@ func (a *APIServer) Start() error {
 	tcpAddr := a.cfg.API.Listen
 
 	// Normalize unix socket if given in Listen
-	if after, ok :=strings.CutPrefix(tcpAddr, "unix://"); ok  {
+	if after, ok := strings.CutPrefix(tcpAddr, "unix://"); ok {
 		unixPath = after
 		tcpAddr = ""
 	} else if strings.HasSuffix(tcpAddr, ".sock") || (strings.HasPrefix(tcpAddr, "/") && !strings.Contains(tcpAddr, ":")) {

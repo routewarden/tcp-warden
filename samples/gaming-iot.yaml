@@ -1,0 +1,81 @@
+# ==============================================================================
+# RouteWarden TCP Warden - Gaming & IoT Protocol Firewall Sample
+# ==============================================================================
+# Demonstrates DDoS protection, handshake validation, and connection throttling
+# for game servers (Minecraft, Steam A2S) and IoT message brokers (MQTT, AMQP).
+#
+# Plugins required:
+#   tcp-warden plugins install minecraft
+#   tcp-warden plugins install mqtt
+#   tcp-warden plugins install amqp
+# ==============================================================================
+
+version: "1.0"
+
+global:
+  max_connections: 50000
+  ban_duration: "1h"
+  ban_after_failures: 5
+  tarpit_ms: 1000
+  log_level: "info"
+  log_file: "/var/log/routewarden/gaming-iot.jsonl"
+  data_dir: "/var/lib/routewarden"
+
+api:
+  enabled: true
+  listen: "127.0.0.1:9091"
+
+plugins:
+  minecraft:
+    enabled: true
+  mqtt:
+    enabled: true
+  amqp:
+    enabled: true
+
+services:
+  # ----------------------------------------------------------------------------
+  # Minecraft Server Protection
+  # ----------------------------------------------------------------------------
+  # Inspects Minecraft VarInt handshakes. Mitigates bot join floods, handshake
+  # exploits, and ping/status reflection attacks.
+  minecraft_survival:
+    listen: ":25565"
+    upstream: "10.0.0.40:25565"
+    protocol: "minecraft"
+    rate_limit:
+      connections_per_minute: 40
+      burst: 10
+    response:
+      mode: "reject"
+      reject_message: "§cBlocked by RouteWarden Anti-Bot Shield"
+
+  # ----------------------------------------------------------------------------
+  # MQTT IoT Telemetry Ingestion
+  # ----------------------------------------------------------------------------
+  # Validates MQTT CONNECT packets, enforces client ID cleanliness, and defends
+  # brokers from unauthorized device connection storms.
+  mqtt_broker:
+    listen: ":1883"
+    upstream: "10.0.0.50:1883"
+    protocol: "mqtt"
+    max_auth_failures: 5
+    ban_duration: "30m"
+    rate_limit:
+      connections_per_minute: 120
+      burst: 30
+
+  # ----------------------------------------------------------------------------
+  # AMQP / RabbitMQ Message Queue Guard
+  # ----------------------------------------------------------------------------
+  # Validates AMQP 0-9-1 / 1.0 protocol negotiation headers and protects queue
+  # consumers from unauthorized port scanning.
+  rabbitmq_ingress:
+    listen: ":5672"
+    upstream: "10.0.0.51:5672"
+    protocol: "amqp"
+    max_auth_failures: 3
+    ban_duration: "1h"
+    rate_limit:
+      connections_per_minute: 300
+      burst: 50

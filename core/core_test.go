@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -297,6 +298,84 @@ func TestAPIServerEndpoints(t *testing.T) {
 	api.srv.Handler.ServeHTTP(recBadUnban, reqBadUnban)
 	if recBadUnban.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for invalid IP in unban, got %d", recBadUnban.Code)
+	}
+}
+
+func TestAPIServerUnixSocket(t *testing.T) {
+	sockPath := fmt.Sprintf("./tw-test-%d.sock", time.Now().UnixNano()%10000000)
+	defer os.Remove(sockPath)
+
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled:    true,
+			Socket:     sockPath,
+			SocketMode: 0666,
+		},
+	}
+
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	go func() {
+		_ = api.Start()
+	}()
+	defer api.Close()
+
+	// Wait up to 2 seconds for unix socket to exist
+	var conn net.Conn
+	var err error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("unix", sockPath, 100*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("failed to connect to unix socket %s: %v", sockPath, err)
+	}
+	conn.Close()
+
+	// Make HTTP request over unix socket
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	resp, err := client.Get("http://unix/health")
+	if err != nil {
+		t.Fatalf("failed GET /health over unix socket: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from unix socket /health, got %d", resp.StatusCode)
+	}
+
+	var health map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		t.Fatalf("failed decoding health json: %v", err)
+	}
+	if health["status"] != "healthy" {
+		t.Errorf("expected status 'healthy', got %v", health["status"])
+	}
+
+	// Close API and verify socket cleanup
+	if err := api.Close(); err != nil {
+		t.Fatalf("unexpected error closing api server: %v", err)
+	}
+
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("expected unix socket %s to be removed on Close, but stat returned %v", sockPath, err)
 	}
 }
 

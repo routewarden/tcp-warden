@@ -18,7 +18,7 @@ RUN rm -rf /usr/local/go/test /usr/local/go/api /usr/local/go/doc
 FROM alpine:3.20
 
 # Install runtime dependencies including git for plugin pulling and libcap for port binding
-RUN apk --no-cache add ca-certificates tzdata git libcap && \
+RUN apk --no-cache add ca-certificates tzdata git libcap su-exec && \
     git config --system --add safe.directory "*"
 
 COPY --from=builder /usr/local/go /usr/local/go
@@ -37,19 +37,23 @@ WORKDIR /usr/src/tcp-warden
 # Create non-root user and directory structure with proper permissions
 RUN addgroup -g 1000 -S routewarden && \
     adduser -u 1000 -S routewarden -G routewarden -D -h /home/routewarden && \
-    mkdir -p /etc/routewarden /var/log/routewarden /var/lib/routewarden/plugins /var/lib/routewarden/go /var/lib/routewarden/cache /home/routewarden && \
-    chown -R routewarden:routewarden /etc/routewarden /var/log/routewarden /var/lib/routewarden /usr/src/tcp-warden /usr/local/bin /home/routewarden && \
+    mkdir -p /etc/routewarden /var/log/routewarden /var/lib/routewarden/plugins /var/lib/routewarden/go /var/lib/routewarden/cache /home/routewarden /var/run/routewarden && \
+    chown -R routewarden:routewarden /etc/routewarden /var/log/routewarden /var/lib/routewarden /usr/src/tcp-warden /usr/local/bin /home/routewarden /var/run/routewarden && \
     setcap 'cap_net_bind_service=+ep' /usr/local/bin/tcp-warden
 
 # Plugins cache directory (mountable via Docker volume)
 ENV ROUTEWARDEN_PLUGINS_CACHE=/var/lib/routewarden/plugins
 ENV ROUTEWARDEN_CONFIG=/etc/routewarden/tcp-warden.yaml
 
-VOLUME ["/etc/routewarden", "/var/lib/routewarden", "/var/log/routewarden"]
+VOLUME ["/etc/routewarden", "/var/lib/routewarden", "/var/log/routewarden", "/var/run/routewarden"]
 
+# 9091: management API (TCP, optional — prefer unix socket via /var/run/routewarden)
 EXPOSE 9091 2222 2525 1110 1143
 
-USER routewarden
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/tcp-warden"]
-CMD ["run"]
+# Run as root so entrypoint.sh can chown the bind-mounted socket dir,
+# then it drops to routewarden (uid 1000) via su-exec.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/local/bin/tcp-warden", "run"]

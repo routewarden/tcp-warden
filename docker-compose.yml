@@ -6,14 +6,19 @@ services:
     image: ghcr.io/routewarden/tcp-warden:latest
     container_name: tcp-warden
     restart: unless-stopped
-    user: "1000:1000"
     cap_add:
       - NET_BIND_SERVICE
+      - CHOWN
     network_mode: host
     volumes:
       - tcp-warden-config:/etc/routewarden
       - tcp-warden-data:/var/lib/routewarden
       - tcp-warden-logs:/var/log/routewarden
+      # Bind-mount the socket directory onto the host so the RouteWarden CLI
+      # dashboard can connect via unix:///var/run/routewarden/tcp-warden.sock
+      # without needing an open TCP port. Docker creates the host directory
+      # automatically on first run (owned by root; chmod as needed).
+      - /var/run/routewarden:/var/run/routewarden
     environment:
       - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
       - ROUTEWARDEN_CONFIG=/etc/routewarden/tcp-warden.yaml

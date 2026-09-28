@@ -10,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
+	"github.com/routewarden/tcp-warden/geoip"
 	"github.com/routewarden/tcp-warden/plugins"
 	"github.com/routewarden/tcp-warden/plugins/sdk"
 	"github.com/routewarden/tcp-warden/protocol"
@@ -105,6 +107,104 @@ func TestFailureTrackerAndAutoBan(t *testing.T) {
 	cAfter := ft.RecordFailure("ssh", "192.0.2.5", 1*time.Minute)
 	if cAfter != 1 {
 		t.Errorf("expected 1 failure count after reset, got %d", cAfter)
+	}
+}
+
+func TestPipeline_AutoBanOnMaxAuthFailures(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		Global: config.GlobalConfig{
+			BanDuration: config.Duration(1 * time.Hour),
+		},
+		Services: map[string]config.ServiceConfig{
+			"auth-svc": {
+				Name:            "auth-svc",
+				Protocol:        "tcp",
+				MaxAuthFailures: 3,
+				BanDuration:     config.Duration(2 * time.Hour),
+				Response: config.ResponseConfig{
+					Mode: "drop",
+				},
+			},
+		},
+	}
+
+	bl := NewBanList("")
+	ft := NewFailureTracker()
+	rl := NewRateLimiter()
+	bus := NewEventBus()
+	stats := NewStatsRegistry()
+
+	pipe := NewPipeline(cfg, bl, ft, rl, bus, stats, nil, nil)
+	svc := cfg.Services["auth-svc"]
+	clientIP := "203.0.113.50"
+
+	// 1. Initial state: not banned
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned initially", clientIP)
+	}
+
+	// 2. Record 1st failure -> count = 1, threshold = 3 -> not banned
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned after 1 failure", clientIP)
+	}
+
+	// 3. Record 2nd failure -> count = 2, threshold = 3 -> not banned
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	if _, isBanned := bl.IsBanned(clientIP); isBanned {
+		t.Fatalf("expected client %s not to be banned after 2 failures", clientIP)
+	}
+
+	// 4. Record 3rd failure -> count = 3, threshold = 3 -> MUST BE BANNED!
+	pipe.recordAuthFailure(&svc, clientIP, geoip.GeoResult{})
+	entry, isBanned := bl.IsBanned(clientIP)
+	if !isBanned {
+		t.Fatalf("expected client %s to be automatically banned after reaching MaxAuthFailures", clientIP)
+	}
+	if !strings.Contains(entry.Reason, "max_auth_failures_exceeded") {
+		t.Errorf("unexpected ban reason: %s", entry.Reason)
+	}
+	if entry.Service != "auth-svc" {
+		t.Errorf("expected banned service to be 'auth-svc', got %s", entry.Service)
+	}
+
+	// 5. Subsequent connection from banned IP is caught at Stage 2
+	connA, connB := net.Pipe()
+	defer connA.Close()
+	defer connB.Close()
+
+	// Wrap connB with mock address
+	mockConn := &mockAddrConn{Conn: connB, remoteIP: clientIP}
+
+	done := make(chan struct{})
+	go func() {
+		pipe.Handle(context.Background(), mockConn, &svc)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Connection handled and dropped
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for pipeline to drop banned connection")
+	}
+
+	st := stats.GetOrCreate("auth-svc")
+	if st.Snapshot().BlockedConnections == 0 {
+		t.Errorf("expected blocked connection count to increment for banned IP")
+	}
+}
+
+type mockAddrConn struct {
+	net.Conn
+	remoteIP string
+}
+
+func (m *mockAddrConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{
+		IP:   net.ParseIP(m.remoteIP),
+		Port: 54321,
 	}
 }
 
@@ -198,6 +298,84 @@ func TestAPIServerEndpoints(t *testing.T) {
 	api.srv.Handler.ServeHTTP(recBadUnban, reqBadUnban)
 	if recBadUnban.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for invalid IP in unban, got %d", recBadUnban.Code)
+	}
+}
+
+func TestAPIServerUnixSocket(t *testing.T) {
+	sockPath := fmt.Sprintf("./tw-test-%d.sock", time.Now().UnixNano()%10000000)
+	defer os.Remove(sockPath)
+
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled:    true,
+			Socket:     sockPath,
+			SocketMode: 0666,
+		},
+	}
+
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	go func() {
+		_ = api.Start()
+	}()
+	defer api.Close()
+
+	// Wait up to 2 seconds for unix socket to exist
+	var conn net.Conn
+	var err error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("unix", sockPath, 100*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("failed to connect to unix socket %s: %v", sockPath, err)
+	}
+	conn.Close()
+
+	// Make HTTP request over unix socket
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	resp, err := client.Get("http://unix/health")
+	if err != nil {
+		t.Fatalf("failed GET /health over unix socket: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from unix socket /health, got %d", resp.StatusCode)
+	}
+
+	var health map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		t.Fatalf("failed decoding health json: %v", err)
+	}
+	if health["status"] != "healthy" {
+		t.Errorf("expected status 'healthy', got %v", health["status"])
+	}
+
+	// Close API and verify socket cleanup
+	if err := api.Close(); err != nil {
+		t.Fatalf("unexpected error closing api server: %v", err)
+	}
+
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("expected unix socket %s to be removed on Close, but stat returned %v", sockPath, err)
 	}
 }
 

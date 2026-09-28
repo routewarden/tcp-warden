@@ -1,0 +1,112 @@
+# ==============================================================================
+# RouteWarden TCP Warden - Database Security Bastion Sample
+# ==============================================================================
+# Demonstrates protecting database services (PostgreSQL, MySQL, Redis, MongoDB)
+# with credential brute-force defense, dangerous command filtering, and CIDR controls.
+#
+# Plugins required:
+#   tcp-warden plugins install postgres
+#   tcp-warden plugins install mysql
+#   tcp-warden plugins install redis
+#   tcp-warden plugins install mongodb
+# ==============================================================================
+
+version: "1.0"
+
+global:
+  max_connections: 20000
+  ban_duration: "2h"
+  ban_after_failures: 3
+  tarpit_ms: 2000
+  log_level: "info"
+  log_file: "/var/log/routewarden/database-bastion.jsonl"
+  data_dir: "/var/lib/routewarden"
+
+api:
+  enabled: true
+  listen: "127.0.0.1:9091"
+
+plugins:
+  postgres:
+    enabled: true
+  mysql:
+    enabled: true
+  redis:
+    enabled: true
+  mongodb:
+    enabled: true
+
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL Bastion
+  # ----------------------------------------------------------------------------
+  # Parses PostgreSQL startup packets and authentication responses.
+  # Automatically detects error 28P01 (invalid password) and bans attackers.
+  postgres_prod:
+    listen: ":5432"
+    upstream: "10.0.0.15:5432"
+    protocol: "postgres"
+    max_auth_failures: 3
+    ban_after_failures: 3
+    ban_duration: "4h"
+    rate_limit:
+      connections_per_minute: 120
+      burst: 30
+    ip_filter:
+      allow:
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+      deny:
+        - "0.0.0.0/0"         # Zero-trust: block all public IPs outside internal ranges
+
+  # ----------------------------------------------------------------------------
+  # MySQL / MariaDB Bastion
+  # ----------------------------------------------------------------------------
+  # Inspects MySQL handshake packets, tracks auth attempts, and bans on code 1045.
+  mysql_prod:
+    listen: ":3306"
+    upstream: "10.0.0.16:3306"
+    protocol: "mysql"
+    max_auth_failures: 3
+    ban_after_failures: 3
+    ban_duration: "4h"
+    rate_limit:
+      connections_per_minute: 100
+      burst: 25
+
+  # ----------------------------------------------------------------------------
+  # Redis Cache Firewall
+  # ----------------------------------------------------------------------------
+  # Blocks dangerous administrative commands from untrusted application tiers.
+  redis_cache:
+    listen: ":6379"
+    upstream: "10.0.0.17:6379"
+    protocol: "redis"
+    rate_limit:
+      connections_per_minute: 500
+      burst: 100
+    plugin_config:
+      blocked_commands:
+        - "FLUSHALL"
+        - "FLUSHDB"
+        - "CONFIG"
+        - "DEBUG"
+        - "SHUTDOWN"
+        - "SLAVEOF"
+        - "REPLICAOF"
+        - "KEYS"
+
+  # ----------------------------------------------------------------------------
+  # MongoDB Shard Guard
+  # ----------------------------------------------------------------------------
+  # Inspects OP_MSG / OP_QUERY BSON payloads and protects mongod / mongos instances.
+  mongodb_cluster:
+    listen: ":27017"
+    upstream: "10.0.0.18:27017"
+    protocol: "mongodb"
+    max_auth_failures: 3
+    ban_duration: "2h"
+    rate_limit:
+      connections_per_minute: 200
+      burst: 50

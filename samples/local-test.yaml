@@ -1,0 +1,121 @@
+# ==============================================================================
+# RouteWarden TCP Warden - Local Testing Configuration
+# ==============================================================================
+# Optimized for zero-setup, offline local testing.
+# - Fast 30-second TTL for rapid auto-ban and expiration testing.
+# - Low threshold: 2 auth failures triggers an instant Layer 4 ban.
+# - Built-in protocols (ssh, smtp, pop3, tcp) work immediately with zero plugins.
+# - Management API on 127.0.0.1:9091 (queried by RouteWarden CLI dashboard).
+# - Local log output to ./tcp-warden-local.jsonl (no root /var/log required).
+#
+# To validate this file:
+#   tcp-warden validate --config samples/local-test.yaml
+#
+# To start the daemon:
+#   tcp-warden run --config samples/local-test.yaml
+#
+# To connect the RouteWarden dashboard:
+#   rwarden dashboard --tcp-warden http://127.0.0.1:9091
+# ==============================================================================
+
+version: "1.0"
+
+global:
+  max_connections: 5000
+  ban_duration: "30s"          # 30-second ban TTL for fast testing
+  ban_after_failures: 2        # 2 failed attempts = instant ban
+  tarpit_ms: 500
+  log_level: "debug"
+  log_file: "./tcp-warden-local.jsonl"
+  data_dir: "./.tcp-warden-data"
+
+api:
+  enabled: true
+  listen: "127.0.0.1:9091"     # REST + SSE API for CLI dashboard
+
+crowdsec:
+  enabled: false               # Standalone mode (set true when testing with CrowdSec LAPI)
+
+plugins: {}
+# When plugins are installed (e.g. via 'tcp-warden plugins install postgres'),
+# enable them here to activate protocol-specific deep inspection:
+# plugins:
+#   postgres:
+#     enabled: true
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. SSH Guard (Standard Built-in Protocol)
+  # ----------------------------------------------------------------------------
+  # Test with: ssh -p 2222 test@127.0.0.1
+  test_ssh:
+    listen: "127.0.0.1:2222"
+    upstream: "127.0.0.1:22"
+    protocol: "ssh"
+    max_auth_failures: 2
+    ban_after_failures: 2
+    ban_duration: "30s"
+    rate_limit:
+      connections_per_minute: 15
+      burst: 5
+    ssh:
+      banner: "RouteWarden Local Test SSH Guard"
+      max_auth_tries: 2
+
+  # ----------------------------------------------------------------------------
+  # 2. SMTP Mail Guard (Standard Built-in Protocol)
+  # ----------------------------------------------------------------------------
+  # Test with: nc 127.0.0.1 2525
+  test_smtp:
+    listen: "127.0.0.1:2525"
+    upstream: "127.0.0.1:25"
+    protocol: "smtp"
+    rate_limit:
+      connections_per_minute: 30
+      burst: 10
+    response:
+      mode: "reject"
+      reject_message: "554 5.7.1 Service unavailable: blocked by RouteWarden Test"
+    smtp:
+      max_recipients: 5
+      blocked_sender_domains:
+        - "*.tempmail.com"
+        - "spam.org"
+
+  # ----------------------------------------------------------------------------
+  # 3. POP3 Guard (Standard Built-in Protocol)
+  # ----------------------------------------------------------------------------
+  test_pop3:
+    listen: "127.0.0.1:1110"
+    upstream: "127.0.0.1:110"
+    protocol: "pop3"
+    max_auth_failures: 2
+    ban_duration: "30s"
+
+  # ----------------------------------------------------------------------------
+  # 4. Generic TCP Bastion with CIDR Allow/Deny (Standard Built-in Protocol)
+  # ----------------------------------------------------------------------------
+  # Test with: nc 127.0.0.1 7000
+  test_echo:
+    listen: "127.0.0.1:7000"
+    upstream: "127.0.0.1:9091" # Points to API port for quick echo connection test
+    protocol: "tcp"
+    rate_limit:
+      connections_per_minute: 60
+      burst: 20
+    ip_filter:
+      allow:
+        - "127.0.0.1/32"
+        - "10.0.0.0/8"
+      deny:
+        - "198.51.100.0/24"
+
+  # ----------------------------------------------------------------------------
+  # 5. PostgreSQL Bastion (Uncomment after running: tcp-warden plugins install postgres)
+  # ----------------------------------------------------------------------------
+  # test_postgres:
+  #   listen: "127.0.0.1:5432"
+  #   upstream: "127.0.0.1:5433"
+  #   protocol: "postgres"
+  #   max_auth_failures: 2
+  #   ban_duration: "30s"

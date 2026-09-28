@@ -35,7 +35,6 @@ archives:
       - README.md
       - LICENSE
       - tcp-warden.yaml
-      - tcp-warden.schema.json
 
 checksum:
   name_template: "checksums.txt"

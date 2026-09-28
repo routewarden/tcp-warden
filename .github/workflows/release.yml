@@ -77,3 +77,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ github.ref_name }}
+          # Persist BuildKit layer + Go module/build caches between CI runs.
+          # Combined with --mount=type=cache in the Dockerfile this means
+          # modules are only downloaded once and Go only recompiles changed pkgs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

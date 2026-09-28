@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 
-ARG VERSION=1.0.6
+ARG VERSION=1.1.0
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.version=${VERSION}" \
     -o /bin/tcp-warden .

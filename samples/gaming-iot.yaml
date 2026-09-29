@@ -2,9 +2,9 @@
 # RouteWarden TCP Warden - Gaming & IoT Protocol Firewall Sample
 # ==============================================================================
 # Demonstrates DDoS protection, handshake validation, and connection throttling
-# for game servers (Minecraft, Steam A2S) and IoT message brokers (MQTT, AMQP).
+# for game servers (Minecraft) and IoT message brokers (MQTT, AMQP).
 #
-# Plugins required:
+# Plugins are automatically synced on boot via 'source' or installed manually:
 #   tcp-warden plugins install minecraft
 #   tcp-warden plugins install mqtt
 #   tcp-warden plugins install amqp
@@ -28,10 +28,13 @@ api:
 plugins:
   minecraft:
     enabled: true
+    source: "https://github.com/routewarden/plugins/minecraft"
   mqtt:
     enabled: true
+    source: "https://github.com/routewarden/plugins/mqtt"
   amqp:
     enabled: true
+    source: "https://github.com/routewarden/plugins/amqp"
 
 services:
   # ----------------------------------------------------------------------------

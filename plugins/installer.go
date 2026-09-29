@@ -341,6 +341,19 @@ func updateInstalledExecutable(newBinaryPath string) {
 		return
 	}
 
+	// Cache recompiled binary to persistent volume if available (/var/lib/routewarden)
+	// so compiled plugins survive container recreations without needing to recompile on every boot.
+	if fi, err := os.Stat("/var/lib/routewarden"); err == nil && fi.IsDir() {
+		persistDir := "/var/lib/routewarden/bin"
+		_ = os.MkdirAll(persistDir, 0755)
+		persistTarget := filepath.Join(persistDir, "tcp-warden")
+		tmpPersist := persistTarget + ".tmp"
+		if err := copyFile(absNew, tmpPersist); err == nil {
+			_ = os.Chmod(tmpPersist, 0755)
+			_ = os.Rename(tmpPersist, persistTarget)
+		}
+	}
+
 	if absExec == absNew {
 		return
 	}
@@ -447,18 +460,22 @@ func SyncPluginFromSource(name string, source string, opts InstallOptions) (*Ins
 		_ = os.MkdirAll(opts.CacheDir, 0755)
 	}
 
-	_ = os.RemoveAll(cachedPluginDir)
-	if err := copyDir(stagedDir, cachedPluginDir); err != nil {
-		// If caching to opts.CacheDir fails (e.g. shadowed volume mount, unwritable volume),
-		// gracefully fallback to local cache directory in project directory
-		fallbackCacheDir := filepath.Join(opts.ProjectDir, ".plugins_cache")
-		fallbackPluginDir := filepath.Join(fallbackCacheDir, name)
-		_ = os.MkdirAll(fallbackCacheDir, 0755)
-		_ = os.RemoveAll(fallbackPluginDir)
-		if fErr := copyDir(stagedDir, fallbackPluginDir); fErr == nil {
-			cachedPluginDir = fallbackPluginDir
-		} else {
-			return nil, fmt.Errorf("caching plugin %q to %s: %w", name, cachedPluginDir, err)
+	stagingAbs, _ := filepath.Abs(stagedDir)
+	cachedAbs, _ := filepath.Abs(cachedPluginDir)
+	if stagingAbs != cachedAbs {
+		_ = os.RemoveAll(cachedPluginDir)
+		if err := copyDir(stagedDir, cachedPluginDir); err != nil {
+			// If caching to opts.CacheDir fails (e.g. shadowed volume mount, unwritable volume),
+			// gracefully fallback to local cache directory in project directory
+			fallbackCacheDir := filepath.Join(opts.ProjectDir, ".plugins_cache")
+			fallbackPluginDir := filepath.Join(fallbackCacheDir, name)
+			_ = os.MkdirAll(fallbackCacheDir, 0755)
+			_ = os.RemoveAll(fallbackPluginDir)
+			if fErr := copyDir(stagedDir, fallbackPluginDir); fErr == nil {
+				cachedPluginDir = fallbackPluginDir
+			} else {
+				return nil, fmt.Errorf("caching plugin %q to %s: %w", name, cachedPluginDir, err)
+			}
 		}
 	}
 
@@ -510,7 +527,18 @@ func stagePluginSource(source string) (string, bool, error) {
 		return filepath.Join(localInPlugins, source), false, nil
 	}
 
-	// 3. If bare plugin name without slashes, fallback to official routewarden/plugins repository
+	// 3. Check /plugins container volume mount (e.g. /plugins/<source> or /plugins)
+	containerPlugin := filepath.Join("/plugins", source)
+	if sInfo, err := os.Stat(containerPlugin); err == nil && sInfo.IsDir() {
+		return containerPlugin, false, nil
+	}
+	if sInfo, err := os.Stat("/plugins"); err == nil && sInfo.IsDir() {
+		if subInfo, err := os.Stat(filepath.Join("/plugins", source)); err == nil && subInfo.IsDir() {
+			return filepath.Join("/plugins", source), false, nil
+		}
+	}
+
+	// 4. If bare plugin name without slashes, fallback to official routewarden/plugins repository
 	if !strings.Contains(source, "/") && !strings.Contains(source, "\\") {
 		source = "https://github.com/routewarden/plugins/" + source
 	}
@@ -599,6 +627,9 @@ func registerInAllGo(allGoPath string, pluginName string) error {
 	}
 
 	newContent := s[:insertPos] + "\t" + importPath + "\n" + s[insertPos:]
+	if fi, err := os.Stat("/var/lib/routewarden"); err == nil && fi.IsDir() {
+		_ = os.WriteFile("/var/lib/routewarden/all.go", []byte(newContent), 0644)
+	}
 	return os.WriteFile(allGoPath, []byte(newContent), 0644)
 }
 
@@ -622,7 +653,11 @@ func unregisterFromAllGo(allGoPath string, pluginName string) error {
 		newLines = append(newLines, line)
 	}
 
-	return os.WriteFile(allGoPath, []byte(strings.Join(newLines, "\n")), 0644)
+	res := strings.Join(newLines, "\n")
+	if fi, err := os.Stat("/var/lib/routewarden"); err == nil && fi.IsDir() {
+		_ = os.WriteFile("/var/lib/routewarden/all.go", []byte(res), 0644)
+	}
+	return os.WriteFile(allGoPath, []byte(res), 0644)
 }
 
 // UninstallPlugin removes an installed plugin.
@@ -671,9 +706,16 @@ func ensureBuildPrerequisites(projectDir string) {
 	EnsureBuildPrerequisites(projectDir)
 }
 
-func saveInstalledEntry(projectDir string, entry InstalledPluginEntry) error {
+func resolvePluginsRegistryPath(projectDir string) string {
+	if fi, err := os.Stat("/var/lib/routewarden"); err == nil && fi.IsDir() {
+		return filepath.Join("/var/lib/routewarden", "plugins.json")
+	}
 	projectDir = ResolveProjectDir(projectDir)
-	regPath := filepath.Join(projectDir, "plugins.json")
+	return filepath.Join(projectDir, "plugins.json")
+}
+
+func saveInstalledEntry(projectDir string, entry InstalledPluginEntry) error {
+	regPath := resolvePluginsRegistryPath(projectDir)
 	var reg installedRegistry
 
 	if data, err := os.ReadFile(regPath); err == nil {
@@ -700,8 +742,7 @@ func saveInstalledEntry(projectDir string, entry InstalledPluginEntry) error {
 }
 
 func removeInstalledEntry(projectDir string, name string) error {
-	projectDir = ResolveProjectDir(projectDir)
-	regPath := filepath.Join(projectDir, "plugins.json")
+	regPath := resolvePluginsRegistryPath(projectDir)
 	var reg installedRegistry
 
 	data, err := os.ReadFile(regPath)
@@ -743,8 +784,7 @@ func removeInstalledEntry(projectDir string, name string) error {
 
 // GetInstalledRegistry loads plugins.json if available.
 func GetInstalledRegistry(projectDir string) ([]InstalledPluginEntry, error) {
-	projectDir = ResolveProjectDir(projectDir)
-	regPath := filepath.Join(projectDir, "plugins.json")
+	regPath := resolvePluginsRegistryPath(projectDir)
 	data, err := os.ReadFile(regPath)
 	if err != nil {
 		return nil, nil
@@ -758,8 +798,7 @@ func GetInstalledRegistry(projectDir string) ([]InstalledPluginEntry, error) {
 
 // SavePluginEnablement persists the enabled/disabled state of a plugin to plugins.json.
 func SavePluginEnablement(projectDir string, name string, enabled bool) error {
-	projectDir = ResolveProjectDir(projectDir)
-	regPath := filepath.Join(projectDir, "plugins.json")
+	regPath := resolvePluginsRegistryPath(projectDir)
 	var reg installedRegistry
 
 	if data, err := os.ReadFile(regPath); err == nil {
@@ -800,8 +839,7 @@ func SavePluginEnablement(projectDir string, name string, enabled bool) error {
 
 // GetPluginEnablement returns lists of enabled and disabled plugins from plugins.json.
 func GetPluginEnablement(projectDir string) ([]string, []string, error) {
-	projectDir = ResolveProjectDir(projectDir)
-	regPath := filepath.Join(projectDir, "plugins.json")
+	regPath := resolvePluginsRegistryPath(projectDir)
 	data, err := os.ReadFile(regPath)
 	if err != nil {
 		return nil, nil, nil
@@ -864,6 +902,44 @@ func copyFile(src, dst string) error {
 }
 
 var wellKnownPluginDefaults = map[string]sdk.DefaultServiceConfig{
+	"ssh": {
+		ServiceName:      "ssh",
+		Listen:           ":2222",
+		Upstream:         "127.0.0.1:22",
+		Protocol:         "ssh",
+		RateLimitCPM:     20,
+		RateLimitBurst:   5,
+		MaxAuthFailures:  3,
+		BanAfterFailures: 3,
+	},
+	"smtp": {
+		ServiceName:    "smtp",
+		Listen:         ":2525",
+		Upstream:       "127.0.0.1:25",
+		Protocol:       "smtp",
+		RateLimitCPM:   30,
+		RateLimitBurst: 10,
+	},
+	"pop3": {
+		ServiceName:      "pop3",
+		Listen:           ":1110",
+		Upstream:         "127.0.0.1:110",
+		Protocol:         "pop3",
+		RateLimitCPM:     20,
+		RateLimitBurst:   5,
+		MaxAuthFailures:  3,
+		BanAfterFailures: 3,
+	},
+	"imap": {
+		ServiceName:      "imap",
+		Listen:           ":1143",
+		Upstream:         "127.0.0.1:143",
+		Protocol:         "imap",
+		RateLimitCPM:     20,
+		RateLimitBurst:   5,
+		MaxAuthFailures:  3,
+		BanAfterFailures: 3,
+	},
 	"postgres": {
 		ServiceName:      "postgres",
 		Listen:           ":5433",

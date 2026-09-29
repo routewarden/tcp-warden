@@ -4,7 +4,7 @@
 # Demonstrates protecting database services (PostgreSQL, MySQL, Redis, MongoDB)
 # with credential brute-force defense, dangerous command filtering, and CIDR controls.
 #
-# Plugins required:
+# Plugins are automatically synced on boot via 'source' or installed manually:
 #   tcp-warden plugins install postgres
 #   tcp-warden plugins install mysql
 #   tcp-warden plugins install redis
@@ -29,12 +29,16 @@ api:
 plugins:
   postgres:
     enabled: true
+    source: "https://github.com/routewarden/plugins/postgres"
   mysql:
     enabled: true
+    source: "https://github.com/routewarden/plugins/mysql"
   redis:
     enabled: true
+    source: "https://github.com/routewarden/plugins/redis"
   mongodb:
     enabled: true
+    source: "https://github.com/routewarden/plugins/mongodb"
 
 services:
   # ----------------------------------------------------------------------------

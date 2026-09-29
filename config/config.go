@@ -64,6 +64,7 @@ type Config struct {
 	API      APIConfig                `yaml:"api"`
 	CrowdSec CrowdSecConfig           `yaml:"crowdsec"`
 	Services map[string]ServiceConfig `yaml:"services"`
+	Warnings []string                 `yaml:"-"`
 }
 
 // PluginsConfig manages enablement and configuration of modular plugins.
@@ -755,6 +756,35 @@ func (s *ServiceConfig) GetPluginOptions() map[string]any {
 	}
 
 	switch s.Protocol {
+	case "ssh":
+		if s.SSH.Banner != "" {
+			opts["banner"] = s.SSH.Banner
+		}
+		if s.SSH.MaxAuthTries > 0 {
+			opts["max_auth_tries"] = s.SSH.MaxAuthTries
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_tries"] = s.MaxAuthFailures
+		}
+	case "smtp", "mail":
+		if len(s.SMTP.BlockedSenderDomains) > 0 {
+			opts["blocked_sender_domains"] = s.SMTP.BlockedSenderDomains
+		}
+		if s.SMTP.MaxRecipients > 0 {
+			opts["max_recipients"] = s.SMTP.MaxRecipients
+		}
+		opts["require_starttls"] = s.SMTP.RequireSTARTTLS
+	case "pop3":
+		if s.POP3.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.POP3.MaxAuthFailures
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MaxAuthFailures
+		}
+	case "imap":
+		if s.IMAP.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.IMAP.MaxAuthFailures
+		} else if s.MaxAuthFailures > 0 {
+			opts["max_auth_failures"] = s.MaxAuthFailures
+		}
 	case "postgres", "postgresql":
 		if s.Postgres.MaxAuthFailures > 0 {
 			opts["max_auth_failures"] = s.Postgres.MaxAuthFailures
@@ -1103,13 +1133,18 @@ func (c *Config) Validate() error {
 			// Check if supported by registered plugin
 			p, ok := plugins.Get(svc.Protocol)
 			if !ok {
-				return fmt.Errorf("service %q: protocol %q requires plugin %q which is not installed. Install it via 'tcp-warden plugins install https://github.com/routewarden/plugins/%s' or configure source under 'plugins.%s.source' in tcp-warden.yaml",
-					name, svc.Protocol, svc.Protocol, svc.Protocol, svc.Protocol)
+				if entry, hasEntry := c.Plugins.Entries[svc.Protocol]; hasEntry && entry.Source != "" {
+					break
+				}
+				c.Warnings = append(c.Warnings, fmt.Sprintf("service %q: protocol %q requires plugin %q which is not installed. Install it via 'tcp-warden plugins install https://github.com/routewarden/plugins/%s' or configure source under 'plugins.%s.source' in tcp-warden.yaml",
+					name, svc.Protocol, svc.Protocol, svc.Protocol, svc.Protocol))
+				break
 			}
 			// Non-standard plugins are disabled by default and must be explicitly enabled
 			if !c.IsPluginEnabled(p.Manifest().Name) {
-				return fmt.Errorf("service %q: protocol %q requires plugin %q which is DISABLED by default. Enable it under 'plugins.%s.enabled: true' in tcp-warden.yaml or run 'tcp-warden plugins enable %s'",
-					name, svc.Protocol, p.Manifest().Name, p.Manifest().Name, p.Manifest().Name)
+				c.Warnings = append(c.Warnings, fmt.Sprintf("service %q: protocol %q requires plugin %q which is DISABLED by default. Enable it under 'plugins.%s.enabled: true' in tcp-warden.yaml or run 'tcp-warden plugins enable %s'",
+					name, svc.Protocol, p.Manifest().Name, p.Manifest().Name, p.Manifest().Name))
+				break
 			}
 			if err := p.ValidateConfig(svc.GetPluginOptions()); err != nil {
 				return fmt.Errorf("service %q: plugin %q config error: %w", name, p.Manifest().Name, err)

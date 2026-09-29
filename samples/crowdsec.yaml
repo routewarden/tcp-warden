@@ -26,6 +26,14 @@ api:
   enabled: true
   listen: "127.0.0.1:9091"
 
+plugins:
+  ssh:
+    enabled: true
+    source: "https://github.com/routewarden/plugins/ssh"
+  smtp:
+    enabled: true
+    source: "https://github.com/routewarden/plugins/smtp"
+
 # ------------------------------------------------------------------------------
 # CrowdSec Local API (LAPI) Configuration
 # ------------------------------------------------------------------------------

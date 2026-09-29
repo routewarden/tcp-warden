@@ -1,4 +1,6 @@
-# Sample tcp-warden.yaml
+# ==============================================================================
+# RouteWarden TCP Warden - Sample Configuration
+# ==============================================================================
 version: "1.0"
 
 global:
@@ -14,9 +16,14 @@ api:
 
 crowdsec:
   enabled: false
-  lapi_url: "http://127.0.0.1:8080"
-  api_key: ""
-  update_frequency: "10s"
+
+plugins:
+  ssh:
+    enabled: true
+    source: "https://github.com/routewarden/plugins/ssh"
+  smtp:
+    enabled: true
+    source: "https://github.com/routewarden/plugins/smtp"
 
 services:
   ssh:

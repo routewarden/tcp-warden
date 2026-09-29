@@ -45,11 +45,11 @@ Incoming TCP Connections (SSH :2222, SMTP :2525, POP3 :1110, DB :5433)
 ---
 
 - **Modular Plugin Architecture (Self-Testing & Auto-Disable)**:
-  - Standard non-HTTP protocols (`ssh`, `smtp`, `pop3`, `imap`, `tcp`) are built-in for zero latency.
-  - Specialized and non-standard services (`postgres`, `mysql`, `redis`, `ftp`, `tls_sni`, plus custom protocols) are isolated into independent, modular plugins.
+  - The core daemon provides high-performance transparent Layer 4 TCP proxying (`generic` / `tcp`).
+  - All protocol-specific inspectors (`ssh`, `smtp`, `pop3`, `imap`, `postgres`, `mysql`, `redis`, `http`, `ftp`, `tls_sni`, plus custom protocols) are isolated into independent, modular plugins in [`routewarden/plugins`](https://github.com/routewarden/plugins).
   - **Self-Testing on Load**: Every plugin implements an automated in-memory `SelfTest() error` suite using synthetic connections.
   - **Auto-Disable Resilience**: The daemon runs plugin self-tests during boot; if any plugin fails its self-test, it is **automatically disabled** (`StatusDisabled`), preventing security bypasses or panics while keeping all other services operational.
-  - **Custom & Third-Party Plugins**: Anyone can author custom protocol inspectors (`plugins/examples/echo_filter`, `plugins/examples/mqtt`) with typed configurations and self-testing.
+  - **Custom & Third-Party Plugins**: Anyone can author custom protocol inspectors (`tcp-warden plugins create <name>`) with typed configurations and self-testing.
 - **Deep Protocol Inspection**:
   - **SSH**: Non-destructive banner validation and real-time scanning for `SSH_MSG_USERAUTH_FAILURE` (type 51) packets to count and ban brute-force attackers.
   - **SMTP**: Line-by-line inspection, `MAIL FROM` domain wildcard blocking (`*.tempmail.com`), recipient counting, and transparent `STARTTLS`/`DATA` handover.

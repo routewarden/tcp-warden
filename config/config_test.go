@@ -169,28 +169,6 @@ services:
 `,
 			wantErr: "invalid allowed IP/CIDR",
 		},
-		{
-			name: "unsupported protocol",
-			yaml: `
-services:
-  svc1:
-    listen: ":2222"
-    upstream: "127.0.0.1:22"
-    protocol: "unknown_proto"
-`,
-			wantErr: "requires plugin",
-		},
-		{
-			name: "disabled by default plugin error",
-			yaml: `
-services:
-  svc1:
-    listen: ":5433"
-    upstream: "127.0.0.1:5432"
-    protocol: "postgres"
-`,
-			wantErr: "requires plugin \"postgres\" which is DISABLED by default",
-		},
 	}
 
 	for _, tt := range tests {
@@ -204,6 +182,48 @@ services:
 			}
 		})
 	}
+}
+
+func TestPluginWarnings(t *testing.T) {
+	t.Run("uninstalled plugin produces warning instead of failing validation", func(t *testing.T) {
+		yamlData := `
+services:
+  svc1:
+    listen: ":2222"
+    upstream: "127.0.0.1:22"
+    protocol: "unknown_proto"
+`
+		cfg, err := Parse([]byte(yamlData))
+		if err != nil {
+			t.Fatalf("expected Parse to succeed without crashing/error, got: %v", err)
+		}
+		if len(cfg.Warnings) == 0 {
+			t.Fatalf("expected warnings for uninstalled plugin, got none")
+		}
+		if !strings.Contains(cfg.Warnings[0], "requires plugin") {
+			t.Errorf("expected warning containing 'requires plugin', got: %s", cfg.Warnings[0])
+		}
+	})
+
+	t.Run("disabled plugin produces warning instead of failing validation", func(t *testing.T) {
+		yamlData := `
+services:
+  svc1:
+    listen: ":5433"
+    upstream: "127.0.0.1:5432"
+    protocol: "postgres"
+`
+		cfg, err := Parse([]byte(yamlData))
+		if err != nil {
+			t.Fatalf("expected Parse to succeed without crashing/error, got: %v", err)
+		}
+		if len(cfg.Warnings) == 0 {
+			t.Fatalf("expected warnings for disabled plugin, got none")
+		}
+		if !strings.Contains(cfg.Warnings[0], "which is DISABLED by default") {
+			t.Errorf("expected warning containing 'which is DISABLED by default', got: %s", cfg.Warnings[0])
+		}
+	})
 }
 
 func TestPluginEnablementValidation(t *testing.T) {

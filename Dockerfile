@@ -86,10 +86,8 @@ RUN addgroup -g 1000 -S routewarden && \
 ENV ROUTEWARDEN_PLUGINS_CACHE=/var/lib/routewarden/plugins
 ENV ROUTEWARDEN_CONFIG=/etc/routewarden/tcp-warden.yaml
 
-VOLUME ["/etc/routewarden", "/var/lib/routewarden", "/var/log/routewarden", "/var/run/routewarden"]
-
-# 9091: management API (TCP, optional — prefer unix socket via /var/run/routewarden)
-EXPOSE 9091 2222 2525 1110 1143
+# 9091: management API, 15432: default generic L4 proxy service
+EXPOSE 9091 15432
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

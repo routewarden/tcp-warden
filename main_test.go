@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/routewarden/tcp-warden/config"
 )
 
 func TestNormalizeArgs(t *testing.T) {
@@ -81,4 +83,50 @@ func TestResolveConfigPath(t *testing.T) {
 		t.Errorf("expected tcp-warden.yaml, got %s", p)
 	}
 }
+
+func TestUninstalledPluginConfigDoesNotCrash(t *testing.T) {
+	yamlContent := `version: "1.0"
+services:
+  postgres:
+    listen: ":15432"
+    upstream: "127.0.0.1:5432"
+    protocol: "postgres"
+`
+	tmp, err := os.CreateTemp("", "test-postgres-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	if err := os.WriteFile(tmp.Name(), []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// We need config package to load
+	// In root package, we can parse or load via config.Load
+	cfg, err := resolveAndLoad(tmp.Name())
+	if err != nil {
+		t.Fatalf("expected config to load without error/crash, got: %v", err)
+	}
+
+	if len(cfg.Warnings) == 0 {
+		t.Errorf("expected warnings about uninstalled/disabled plugin, got none")
+	}
+
+	foundWarning := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "postgres") && strings.Contains(w, "requires plugin") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning mentioning postgres plugin requirement, got: %v", cfg.Warnings)
+	}
+}
+
+func resolveAndLoad(path string) (*config.Config, error) {
+	return config.Load(path)
+}
+
 

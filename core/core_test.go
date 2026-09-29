@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -302,8 +303,15 @@ func TestAPIServerEndpoints(t *testing.T) {
 }
 
 func TestAPIServerUnixSocket(t *testing.T) {
-	sockPath := fmt.Sprintf("./tw-test-%d.sock", time.Now().UnixNano()%10000000)
-	defer os.Remove(sockPath)
+	sockPath := filepath.Join(t.TempDir(), "tw.sock")
+
+	// Probe whether unix domain socket creation is permitted in this execution environment
+	probeLn, probeErr := net.Listen("unix", sockPath)
+	if probeErr != nil {
+		t.Skipf("skipping unix socket test: unix domain socket bind not permitted in this environment: %v", probeErr)
+	}
+	probeLn.Close()
+	_ = os.Remove(sockPath)
 
 	cfg := &config.Config{
 		Version: "1.0",

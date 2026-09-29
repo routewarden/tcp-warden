@@ -4,9 +4,9 @@
 # Optimized for zero-setup, offline local testing.
 # - Fast 30-second TTL for rapid auto-ban and expiration testing.
 # - Low threshold: 2 auth failures triggers an instant Layer 4 ban.
-# - Built-in protocols (ssh, smtp, pop3, tcp) work immediately with zero plugins.
-# - Management API on 127.0.0.1:9091 (queried by RouteWarden CLI dashboard).
-# - Local log output to ./tcp-warden-local.jsonl (no root /var/log required).
+# - Generic Layer 4 transparent proxying works immediately with zero plugins.
+# - Management API on :9091 (queried by RouteWarden CLI & Dashboard).
+# - Local log output to ./tcp-warden-local.jsonl.
 #
 # To validate this file:
 #   tcp-warden validate --config samples/local-test.yaml
@@ -14,8 +14,8 @@
 # To start the daemon:
 #   tcp-warden run --config samples/local-test.yaml
 #
-# To connect the RouteWarden dashboard:
-#   rwarden dashboard --tcp-warden http://127.0.0.1:9091
+# To run via Docker Compose:
+#   docker compose -f samples/docker-compose.yaml up -d
 # ==============================================================================
 
 version: "1.0"
@@ -31,74 +31,53 @@ global:
 
 api:
   enabled: true
-  listen: "127.0.0.1:9091"     # REST + SSE API for CLI dashboard
+  listen: ":9091"              # REST + SSE API for dashboard and CLI
 
 crowdsec:
-  enabled: false               # Standalone mode (set true when testing with CrowdSec LAPI)
+  enabled: false
 
 plugins: {}
-# When plugins are installed (e.g. via 'tcp-warden plugins install postgres'),
-# enable them here to activate protocol-specific deep inspection:
-# plugins:
-#   postgres:
-#     enabled: true
 
 services:
   # ----------------------------------------------------------------------------
-  # 1. SSH Guard (Standard Built-in Protocol)
+  # 1. PostgreSQL Bastion
   # ----------------------------------------------------------------------------
-  # Test with: ssh -p 2222 test@127.0.0.1
-  test_ssh:
-    listen: "127.0.0.1:2222"
-    upstream: "127.0.0.1:22"
-    protocol: "ssh"
+  # Forwards incoming traffic on :5432 to postgres-backend:5432 (or 127.0.0.1:5432).
+  # Test with: PGPASSWORD=wrong psql -h 127.0.0.1 -p 5432 -U testuser testdb
+  postgres_bastion:
+    listen: ":5432"
+    upstream: "postgres-backend:5432"
+    protocol: "tcp"
+    rate_limit:
+      connections_per_minute: 60
+      burst: 15
     max_auth_failures: 2
     ban_after_failures: 2
     ban_duration: "30s"
-    rate_limit:
-      connections_per_minute: 15
-      burst: 5
-    ssh:
-      banner: "RouteWarden Local Test SSH Guard"
-      max_auth_tries: 2
 
   # ----------------------------------------------------------------------------
-  # 2. SMTP Mail Guard (Standard Built-in Protocol)
+  # 2. Redis Cache Guard
   # ----------------------------------------------------------------------------
-  # Test with: nc 127.0.0.1 2525
-  test_smtp:
-    listen: "127.0.0.1:2525"
-    upstream: "127.0.0.1:25"
-    protocol: "smtp"
+  # Forwards incoming traffic on :6379 to redis-backend:6379 (or 127.0.0.1:6379).
+  # Test with: redis-cli -p 6379 PING
+  redis_guard:
+    listen: ":6379"
+    upstream: "redis-backend:6379"
+    protocol: "tcp"
     rate_limit:
-      connections_per_minute: 30
-      burst: 10
-    response:
-      mode: "reject"
-      reject_message: "554 5.7.1 Service unavailable: blocked by RouteWarden Test"
-    smtp:
-      max_recipients: 5
-      blocked_sender_domains:
-        - "*.tempmail.com"
-        - "spam.org"
-
-  # ----------------------------------------------------------------------------
-  # 3. POP3 Guard (Standard Built-in Protocol)
-  # ----------------------------------------------------------------------------
-  test_pop3:
-    listen: "127.0.0.1:1110"
-    upstream: "127.0.0.1:110"
-    protocol: "pop3"
+      connections_per_minute: 120
+      burst: 30
     max_auth_failures: 2
+    ban_after_failures: 2
     ban_duration: "30s"
 
   # ----------------------------------------------------------------------------
-  # 4. Generic TCP Bastion with CIDR Allow/Deny (Standard Built-in Protocol)
+  # 3. Generic TCP Bastion with CIDR Filter
   # ----------------------------------------------------------------------------
   # Test with: nc 127.0.0.1 7000
-  test_echo:
-    listen: "127.0.0.1:7000"
-    upstream: "127.0.0.1:9091" # Points to API port for quick echo connection test
+  echo_bastion:
+    listen: ":7000"
+    upstream: "127.0.0.1:9091"
     protocol: "tcp"
     rate_limit:
       connections_per_minute: 60
@@ -107,15 +86,5 @@ services:
       allow:
         - "127.0.0.1/32"
         - "10.0.0.0/8"
-      deny:
-        - "198.51.100.0/24"
-
-  # ----------------------------------------------------------------------------
-  # 5. PostgreSQL Bastion (Uncomment after running: tcp-warden plugins install postgres)
-  # ----------------------------------------------------------------------------
-  # test_postgres:
-  #   listen: "127.0.0.1:5432"
-  #   upstream: "127.0.0.1:5433"
-  #   protocol: "postgres"
-  #   max_auth_failures: 2
-  #   ban_duration: "30s"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"

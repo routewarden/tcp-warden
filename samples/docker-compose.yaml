@@ -2,13 +2,13 @@
 # RouteWarden TCP Warden - Local Testing Docker Compose Stack
 # ==============================================================================
 # Spins up:
-# 1. postgres-backend: Test PostgreSQL server
-# 2. redis-backend:    Test Redis server
+# 1. postgres-backend: Test PostgreSQL server (port 5432)
+# 2. redis-backend:    Test Redis server (port 6379)
 # 3. tcp-warden:       L4 firewall & proxy inspecting ports 5432 & 6379
 # 4. rwarden-ui:       RouteWarden dashboard with live TCP Warden view
 #
 # Quick start:
-#   docker compose -f samples/docker-compose.test.yaml up -d
+#   docker compose -f samples/docker-compose.yaml up -d
 #
 # Open dashboard:
 #   http://localhost:9090
@@ -52,10 +52,11 @@ services:
       # Public listener ports (protected by TCP Warden)
       - "5432:5432"   # PostgreSQL Bastion
       - "6379:6379"   # Redis Guard
-      - "2222:2222"   # SSH Guard
+      - "7000:7000"   # Generic TCP Echo Test
       - "9091:9091"   # Management API
     volumes:
       - ./local-test.yaml:/etc/routewarden/tcp-warden.yaml:ro
+      - tcp-warden-plugins:/var/lib/routewarden/plugins
       - tcp-warden-data:/var/lib/routewarden
     networks:
       - internal-net
@@ -87,4 +88,5 @@ networks:
     driver: bridge
 
 volumes:
+  tcp-warden-plugins:
   tcp-warden-data:

@@ -12,7 +12,6 @@ global:
   log_level: "info"
   log_file: "/var/log/routewarden/tcp-warden.jsonl"
   # Directory for persistent runtime state (bans.db SQLite database survives restarts)
-  # Mount this path as a named Docker volume to preserve bans across container restarts.
   data_dir: "/var/lib/routewarden"
   geoip_db: "/etc/routewarden/GeoLite2-Country.mmdb"
   ip_filter:
@@ -24,9 +23,8 @@ global:
 # Management & metrics API (REST + Server-Sent Events)
 api:
   enabled: true
-  listen: "127.0.0.1:9091"
-  # Optional Unix domain socket for local IPC (avoids exposing TCP ports or container port-mapping):
-  socket: "/var/run/routewarden/tcp-warden.sock"
+  listen: "${ROUTEWARDEN_API_LISTEN:-127.0.0.1:9091}"
+  socket: "${ROUTEWARDEN_API_SOCKET:-/var/run/routewarden/tcp-warden.sock}"
   socket_mode: "0666"
 # CrowdSec LAPI Bouncer integration
 crowdsec:
@@ -34,91 +32,14 @@ crowdsec:
   lapi_url: "http://127.0.0.1:8080"
   api_key: "${CROWDSEC_API_KEY}"
   update_frequency: "10s"
-# Modular Protocol Plugins
-# Non-standard protocol plugins live in https://github.com/routewarden/plugins
-# Install them via CLI:
-#   tcp-warden plugins install https://github.com/routewarden/plugins/postgres
-# Or declare them below to automatically pull, cache, and activate on boot:
-# plugins:
-#   postgres:
-#     enabled: true
-#     source: "https://github.com/routewarden/plugins/postgres"
-#   redis:
-#     enabled: true
-#     source: "https://github.com/routewarden/plugins/redis"
+# Modular Protocol Plugins (https://github.com/routewarden/plugins)
+# Install plugins on demand via CLI: tcp-warden plugins install <name>
 plugins: {}
-# Service definitions
+
+# Active Services
 services:
-  # SSH Service Guard (Standard Protocol - Enabled)
-  ssh:
-    listen: ":2222"
-    upstream: "127.0.0.1:22"
-    protocol: "ssh"
-    rate_limit:
-      connections_per_minute: 20
-      burst: 5
-    geo_block:
-      deny_countries:
-        - "RU"
-        - "CN"
-        - "KP"
-      allow_countries: []
-    ip_filter:
-      allow:
-        - "10.0.0.0/8"
-        - "192.168.0.0/16"
-        - "127.0.0.1/32"
-      deny:
-        - "198.51.100.0/24"
-    max_auth_failures: 3
-    ban_after_failures: 3
-    ban_duration: "2h"
-    response:
-      mode: "reject" # drop | reject | tarpit | silent
-      tarpit_ms: 1500
-      reject_message: "Connection rejected by RouteWarden SSH Guard"
-    ssh:
-      banner: "RouteWarden SSH Guard"
-      max_auth_tries: 3
-  # SMTP Mail Transfer Guard (Standard Protocol - Enabled)
-  smtp:
-    listen: ":2525"
-    upstream: "127.0.0.1:25"
-    protocol: "smtp"
-    rate_limit:
-      connections_per_minute: 30
-      burst: 10
-    response:
-      mode: "reject"
-      reject_message: "554 5.7.1 Service unavailable; client blocked by RouteWarden"
-    smtp:
-      max_recipients: 10
-      blocked_sender_domains:
-        - "*.tempmail.com"
-        - "spam.org"
-      require_starttls: false
-  # POP3 Mail Retrieval Guard (Standard Protocol - Enabled)
-  pop3:
-    listen: ":1110"
-    upstream: "127.0.0.1:110"
-    protocol: "pop3"
-    rate_limit:
-      connections_per_minute: 20
-      burst: 5
-    max_auth_failures: 3
-    ban_after_failures: 3
-  # IMAP Mail Retrieval Guard (Standard Protocol - Enabled)
-  imap:
-    listen: ":1143"
-    upstream: "127.0.0.1:143"
-    protocol: "imap"
-    rate_limit:
-      connections_per_minute: 20
-      burst: 5
-    max_auth_failures: 3
-    ban_after_failures: 3
-  # Generic TCP Tunnel (Standard Protocol - Enabled)
-  database:
+  # Generic Layer 4 TCP Bastion (Built-in Core Protocol)
+  generic_bastion:
     listen: ":15432"
     upstream: "127.0.0.1:5432"
     protocol: "tcp"
@@ -128,70 +49,12 @@ services:
     ip_filter:
       allow:
         - "10.0.0.0/8"
-        - "127.0.0.1"
-
-# Optional Plugin Service Examples (Install plugin first before enabling):
-#
-# PostgreSQL Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/postgres)
-# postgres:
-#   listen: ":5433"
-#   upstream: "127.0.0.1:5432"
-#   protocol: "postgres"
-#   max_auth_failures: 3
-#   ban_after_failures: 3
-#   ban_duration: "1h"
-#
-# MySQL Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/mysql)
-# mysql:
-#   listen: ":3307"
-#   upstream: "127.0.0.1:3306"
-#   protocol: "mysql"
-#   max_auth_failures: 3
-#   ban_after_failures: 3
-#
-# Redis Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/redis)
-# redis:
-#   listen: ":6380"
-#   upstream: "127.0.0.1:6379"
-#   protocol: "redis"
-#   max_auth_failures: 5
-#   ban_after_failures: 5
-#   plugin_config:
-#     blocked_commands:
-#       - "FLUSHALL"
-#       - "FLUSHDB"
-#       - "CONFIG"
-#       - "SHUTDOWN"
-#
-# FTP Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/ftp)
-# ftp:
-#   listen: ":2121"
-#   upstream: "127.0.0.1:21"
-#   protocol: "ftp"
-#   max_auth_failures: 3
-#   ban_after_failures: 3
-#
-# TLS SNI Passthrough Guard (Install: tcp-warden plugins install https://github.com/routewarden/plugins/tls_sni)
-# tls-proxy:
-#   listen: ":8443"
-#   upstream: "127.0.0.1:443"
-#   protocol: "tls"
-#   plugin_config:
-#     allowed_domains:
-#       - "*.example.com"
-#       - "app.internal"
-#     blocked_domains:
-#       - "*.phishing.com"
-#
-# HTTP Port Range (Many-to-One: entire port range proxies to a single backend ingress)
-# http-ingress-pool:
-#   listen: ":8080-8085"
-#   upstream: "127.0.0.1:80"
-#   protocol: "http"
-#
-# HTTP Port Range (1:1 Port Mapping: port offset is preserved to backend instances)
-# http-shards:
-#   listen: ":9000-9003"
-#   upstream: "10.0.0.1:9000-9003"
-#   protocol: "http"
+        - "192.168.0.0/16"
+        - "127.0.0.1/32"
+      deny:
+        - "198.51.100.0/24"
+    geo_block:
+      deny_countries:
+        - "KP"
+      allow_countries: []
 

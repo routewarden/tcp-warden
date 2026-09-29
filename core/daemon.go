@@ -74,6 +74,18 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Auto-enable any installed plugin that is actively configured on an enabled service (unless explicitly disabled)
+	for _, svc := range cfg.Services {
+		if svc.IsEnabled() {
+			proto := strings.ToLower(strings.TrimSpace(svc.Protocol))
+			if proto != "" && proto != "tcp" && proto != "generic" {
+				if !contains(disabledList, proto) && !contains(enabledList, proto) {
+					enabledList = append(enabledList, proto)
+				}
+			}
+		}
+	}
+
 	pluginErrs := plugins.ApplyConfiguration(enabledList, disabledList)
 	for name, err := range pluginErrs {
 		log.Printf("⚠️  [PLUGIN] %q self-test FAILED and remains DISABLED: %v", name, err)
@@ -89,8 +101,8 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	for name, svc := range cfg.Services {
 		if svc.IsEnabled() {
 			switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
-			case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
-				// Standard protocol
+			case "tcp", "generic", "":
+				// Standard built-in core protocol
 			default:
 				if !plugins.IsActive(svc.Protocol) {
 					st, reason, testErr := plugins.GetStatus(svc.Protocol)
@@ -114,10 +126,11 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	if cfg.Global.LogFile != "" {
 		l, err := NewLogWriter(cfg.Global.LogFile)
 		if err != nil {
-			log.Printf("⚠️ Warning: could not initialize log writer for %s: %v", cfg.Global.LogFile, err)
-		} else {
-			logger = l
+			log.Printf("⚠️ Warning: could not initialize log file %s: %v (falling back to stdout)", cfg.Global.LogFile, err)
 		}
+		logger = l
+	} else {
+		logger, _ = NewLogWriter("")
 	}
 
 	var cs *crowdsec.Client

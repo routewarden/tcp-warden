@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
@@ -70,21 +71,27 @@ func NewAPIServer(
 
 	mux.HandleFunc("/api/stats", wrapJSON(api.handleStats))
 	mux.HandleFunc("/api/guard/stats", wrapJSON(api.handleStats))
+	mux.HandleFunc("/stats", wrapJSON(api.handleStats))
 
 	mux.HandleFunc("/api/services", wrapJSON(api.handleServices))
 	mux.HandleFunc("/api/guard/services", wrapJSON(api.handleServices))
+	mux.HandleFunc("/services", wrapJSON(api.handleServices))
 
 	mux.HandleFunc("/api/banlist", wrapJSON(api.handleBanlist))
 	mux.HandleFunc("/api/guard/banlist", wrapJSON(api.handleBanlist))
+	mux.HandleFunc("/banlist", wrapJSON(api.handleBanlist))
 
 	mux.HandleFunc("/api/unban", wrapJSON(api.handleUnban))
 	mux.HandleFunc("/api/guard/unban", wrapJSON(api.handleUnban))
+	mux.HandleFunc("/unban", wrapJSON(api.handleUnban))
 
 	mux.HandleFunc("/api/ban", wrapJSON(api.handleBan))
 	mux.HandleFunc("/api/guard/ban", wrapJSON(api.handleBan))
+	mux.HandleFunc("/ban", wrapJSON(api.handleBan))
 
 	mux.HandleFunc("/api/events", api.handleEvents)
 	mux.HandleFunc("/api/guard/events", api.handleEvents)
+	mux.HandleFunc("/events", api.handleEvents)
 
 	api.srv = &http.Server{
 		Handler: mux,
@@ -123,7 +130,11 @@ func (a *APIServer) Start() error {
 		} else {
 			mode := a.cfg.API.FileMode()
 			if err := os.Chmod(unixPath, mode); err != nil {
-				log.Printf("⚠️  [API] Failed to chmod %04o on %s: %v", mode, unixPath, err)
+				if errors.Is(err, syscall.EINVAL) {
+					log.Printf("⚠️  [API] Socket chmod %04o not supported on this filesystem (e.g. Docker Desktop VM mount): %s", mode, unixPath)
+				} else {
+					log.Printf("⚠️  [API] Failed to chmod %04o on %s: %v", mode, unixPath, err)
+				}
 			}
 			listeners = append(listeners, ln)
 			sockPaths = append(sockPaths, unixPath)

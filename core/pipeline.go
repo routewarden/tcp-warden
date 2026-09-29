@@ -151,7 +151,7 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 
 func isStandardProtocol(proto string) bool {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
+	case "tcp", "generic", "":
 		return true
 	default:
 		return false
@@ -171,15 +171,7 @@ func (p *Pipeline) proxyWithInspection(
 	}
 
 	switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
-	case "ssh":
-		return p.handleSSH(client, upstream, svc, onFailure)
-	case "smtp":
-		return p.handleSMTP(client, upstream, svc, onFailure, clientIP, geo)
-	case "pop3":
-		return p.handlePOP3(client, upstream, svc, onFailure, clientIP, geo)
-	case "imap":
-		return p.handleIMAP(client, upstream, svc, onFailure, clientIP, geo)
-	case "tcp", "generic":
+	case "tcp", "generic", "":
 		res := protocol.Proxy(client, upstream)
 		return res.BytesIn, res.BytesOut, false, ""
 	default:
@@ -224,8 +216,8 @@ func (p *Pipeline) handlePlugin(
 
 	// 3. Prepare plugin context with security callbacks
 	pCtx := &sdk.DefaultContext{
-		ServiceName:   svc.Name,
-		ClientAddress: clientIP,
+		ServiceName:     svc.Name,
+		ClientAddress:   clientIP,
 		AuthFailureFunc: onFailure,
 		SecurityFunc: func(action, reason string) {
 			p.emitEvent(svc, clientIP, geo, action, reason, 0, 0, time.Now())
@@ -235,56 +227,6 @@ func (p *Pipeline) handlePlugin(
 	// 4. Run protocol inspection
 	res, wasBlocked, reason, _ := inspector.Run(pCtx, client, upstream)
 	return res.BytesIn, res.BytesOut, wasBlocked, reason
-}
-
-func (p *Pipeline) handleSSH(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func()) (int64, int64, bool, string) {
-	inspector := protocol.SSHInspector{}
-	reader, res := inspector.Inspect(client)
-
-	if res.IsSSH1 {
-		protocol.RejectSSH1(client)
-		return 0, 0, true, "ssh1_rejected"
-	}
-
-	bufferedClient := &protocol.BufferedConn{
-		Reader: reader,
-		Conn:   client,
-	}
-
-	monitor := protocol.NewSSHAuthMonitor(onFailure)
-	wrappedUpstream := monitor.WrapUpstream(upstream)
-
-	proxyRes := protocol.Proxy(bufferedClient, wrappedUpstream)
-	return proxyRes.BytesIn, proxyRes.BytesOut, false, ""
-}
-
-func (p *Pipeline) handleSMTP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
-	opts := protocol.SMTPInspectorOptions{
-		BlockedSenderDomains: svc.SMTP.BlockedSenderDomains,
-		RequireSTARTTLS:      svc.SMTP.RequireSTARTTLS,
-		OnAuthFailure:        onFailure,
-	}
-	proxy := protocol.NewSMTPProxy(client, upstream, opts)
-	res, wasBlocked, reason := proxy.Run()
-	return res.BytesIn, res.BytesOut, wasBlocked, reason
-}
-
-func (p *Pipeline) handlePOP3(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
-	opts := protocol.POP3InspectorOptions{
-		OnAuthFailure: onFailure,
-	}
-	proxy := protocol.NewPOP3Proxy(client, upstream, opts)
-	res, _, _ := proxy.Run()
-	return res.BytesIn, res.BytesOut, false, ""
-}
-
-func (p *Pipeline) handleIMAP(client, upstream net.Conn, svc *config.ServiceConfig, onFailure func(), clientIP string, geo geoip.GeoResult) (int64, int64, bool, string) {
-	opts := protocol.IMAPInspectorOptions{
-		OnAuthFailure: onFailure,
-	}
-	proxy := protocol.NewIMAPProxy(client, upstream, opts)
-	res, _, _ := proxy.Run()
-	return res.BytesIn, res.BytesOut, false, ""
 }
 
 func (p *Pipeline) recordAuthFailure(svc *config.ServiceConfig, clientIP string, geo geoip.GeoResult) {

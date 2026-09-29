@@ -9,41 +9,56 @@ services:
     cap_add:
       - NET_BIND_SERVICE
       - CHOWN
-    network_mode: host
+    # Network configuration:
+    # - Linux: Uncomment 'network_mode: host' for native host networking and real client IP visibility.
+    # - macOS / Windows: Use 'ports:' below because Docker Desktop runs in a Linux VM where
+    #   'network_mode: host' cannot expose ports to the macOS host loopback.
+    # network_mode: host
+    ports:
+      - "9091:9091"     # RouteWarden Management & Stats API
+      - "15432:15432"   # generic_bastion (active L4 proxy service)
+      # Additional service port examples (uncomment as enabled in tcp-warden.yaml):
+      - "2222:2222"     # SSH Guard
+      # - "25:2525"     # SMTP Mail Guard
+      # - "587:5870"    # SMTP Submission Guard
+      # - "80:8081"     # HTTP Protocol Guard
+      # - "443:8443"    # TLS SNI Router & Guard
+      # - "110:1110"    # POP3 Mail Guard
+      # - "995:9950"    # POP3S Guard
+      # - "143:1143"    # IMAP4 Mail Guard
+      # - "993:9930"    # IMAPS Guard
+      # - "21:2121"     # FTP Control Guard
+      # - "389:1390"    # LDAP Guard
+      # - "636:1636"    # LDAPS Guard
+      - "5433:5433"   # PostgreSQL Bastion
+      # - "3306:3306"   # MySQL Bastion
+      # - "6379:6379"   # Redis Guard
+      # - "27017:27017" # MongoDB Guard
+      # - "11211:11211" # Memcached Guard
+      # - "5672:5672"   # AMQP / RabbitMQ Guard
+      # - "1883:1883"   # MQTT Guard
+      # - "5900:5900"   # VNC Remote Desktop Guard
+      # - "25565:25565" # Minecraft Java Guard
     volumes:
-      - tcp-warden-config:/etc/routewarden
-      - tcp-warden-data:/var/lib/routewarden
+      # tcp-warden logs
       - tcp-warden-logs:/var/log/routewarden
-      # Bind-mount the socket directory onto the host so the RouteWarden CLI
-      # dashboard can connect via unix:///var/run/routewarden/tcp-warden.sock
-      # without needing an open TCP port. Docker creates the host directory
-      # automatically on first run (owned by root; chmod as needed).
-      - /var/run/routewarden:/var/run/routewarden
+      - tcp-warden-config:/etc/routewarden/  # Direct host config bind (no volume needed)
+      - tcp-warden-data:/var/lib/routewarden                  # Runtime state: bans.db (SQLite) & plugins cache
+      - ../plugins:/plugins:ro                                # Host plugins repository (contains postgres, mysql, etc.)
+      # Unix socket mount (Linux only):
+      # On native Linux, uncomment the line below to share the socket for local IPC:
+      # - /var/run/routewarden:/var/run/routewarden
+      # NOTE: On macOS Docker Desktop, Unix domain sockets cannot cross the VM boundary
+      # to the macOS host. Use TCP port 9091 instead for macOS CLI and dashboard.
+    # tmpfs:
+      # - /var/log/routewarden:size=64M                         # Ephemeral in-memory logs (automatically discarded on exit)
     environment:
       - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
       - ROUTEWARDEN_CONFIG=/etc/routewarden/tcp-warden.yaml
-
-  crowdsec:
-    image: crowdsecurity/crowdsec:latest
-    container_name: crowdsec
-    restart: unless-stopped
-    environment:
-      - COLLECTIONS=crowdsecurity/linux
-    volumes:
-      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.d/tcp-warden.yaml:ro
-      - ./crowdsec/parsers/s01-parse/routewarden-tcp-warden.yaml:/etc/crowdsec/parsers/s01-parse/routewarden-tcp-warden.yaml:ro
-      - ./crowdsec/scenarios/routewarden-tcp-ssh-bf.yaml:/etc/crowdsec/scenarios/routewarden-tcp-ssh-bf.yaml:ro
-      - ./crowdsec/scenarios/routewarden-tcp-smtp-bf.yaml:/etc/crowdsec/scenarios/routewarden-tcp-smtp-bf.yaml:ro
-      - ./crowdsec/scenarios/routewarden-tcp-portscan.yaml:/etc/crowdsec/scenarios/routewarden-tcp-portscan.yaml:ro
-      - tcp-warden-logs:/var/log/routewarden:ro
-      - crowdsec-db:/var/lib/crowdsec/data
-      - crowdsec-config:/etc/crowdsec
-    ports:
-      - "8080:8080"
+      - ROUTEWARDEN_API_LISTEN=0.0.0.0:9091
+      - AUTO_INSTALL_PLUGINS=postgres ssh
 
 volumes:
   tcp-warden-config:
-  tcp-warden-data:   # persistent runtime state: bans.db (SQLite) & plugins cache
   tcp-warden-logs:
-  crowdsec-db:
-  crowdsec-config:
+  tcp-warden-data:   # persistent runtime state: bans.db (SQLite) & plugins cache

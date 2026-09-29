@@ -171,6 +171,16 @@ func runDaemon(configPath string) {
 		os.Exit(1)
 	}
 
+	for _, w := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "⚠️  [CONFIG WARN] %s\n", w)
+	}
+
+	d, err := core.NewDaemon(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Error initializing daemon: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("🛡️  Starting RouteWarden TCP Warden...")
 	fmt.Printf("   Config: %s\n", configPath)
 	fmt.Printf("   Services (%d):\n", len(cfg.Services))
@@ -178,6 +188,8 @@ func runDaemon(configPath string) {
 		status := "enabled"
 		if !svc.IsEnabled() {
 			status = "disabled"
+		} else if !isStandardProtocol(svc.Protocol) && !plugins.IsActive(svc.Protocol) {
+			status = "plugin unavailable"
 		}
 		fmt.Printf("     • %-12s [%s]  %s -> %s (%s)\n", name, svc.Protocol, svc.Listen, svc.Upstream, status)
 	}
@@ -190,12 +202,6 @@ func runDaemon(configPath string) {
 	}
 	if cfg.Global.LogFile != "" {
 		fmt.Printf("   Log file:   %s\n", cfg.Global.LogFile)
-	}
-
-	d, err := core.NewDaemon(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error initializing daemon: %v\n", err)
-		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -234,6 +240,10 @@ func handleValidate(args []string) {
 		os.Exit(1)
 	}
 
+	for _, w := range cfg.Warnings {
+		fmt.Printf("⚠️  [CONFIG WARN] %s\n", w)
+	}
+
 	var activeCount int
 	for _, svc := range cfg.Services {
 		if svc.IsEnabled() {
@@ -241,7 +251,11 @@ func handleValidate(args []string) {
 		}
 	}
 
-	fmt.Printf("✓ Configuration %s is VALID.\n", *configPath)
+	if len(cfg.Warnings) > 0 {
+		fmt.Printf("✓ Configuration %s is VALID (with %d warning(s)).\n", *configPath, len(cfg.Warnings))
+	} else {
+		fmt.Printf("✓ Configuration %s is VALID.\n", *configPath)
+	}
 	fmt.Printf("  - Version: %s\n", cfg.Version)
 	fmt.Printf("  - Active services: %d (Total defined: %d)\n", activeCount, len(cfg.Services))
 	for name, svc := range cfg.Services {
@@ -552,6 +566,8 @@ func handlePluginsInstall(args []string) {
 		fmt.Printf("  • Pre-Tests:  PASSED\n")
 		if res.Rebuilt {
 			fmt.Printf("  • Binary:     rebuilt successfully with new plugin\n")
+			fmt.Printf("\n💡 Note: If tcp-warden daemon is running, restart it to load the updated binary:\n")
+			fmt.Printf("   docker restart tcp-warden   (or: docker compose restart tcp-warden)\n")
 		}
 	} else {
 		_ = plugins.SavePluginEnablement(plugins.ResolveProjectDir(""), res.Name, false)
@@ -771,6 +787,10 @@ func handlePluginsList(args []string) {
 		fmt.Println("  tcp-warden plugins install <github-url-or-local-path>")
 		fmt.Println()
 		fmt.Println("Available plugins in routewarden/plugins repository:")
+		fmt.Println("  • ssh:          tcp-warden plugins install https://github.com/routewarden/plugins/ssh")
+		fmt.Println("  • smtp:         tcp-warden plugins install https://github.com/routewarden/plugins/smtp")
+		fmt.Println("  • pop3:         tcp-warden plugins install https://github.com/routewarden/plugins/pop3")
+		fmt.Println("  • imap:         tcp-warden plugins install https://github.com/routewarden/plugins/imap")
 		fmt.Println("  • postgres:     tcp-warden plugins install https://github.com/routewarden/plugins/postgres")
 		fmt.Println("  • mysql:        tcp-warden plugins install https://github.com/routewarden/plugins/mysql")
 		fmt.Println("  • redis:        tcp-warden plugins install https://github.com/routewarden/plugins/redis")
@@ -893,4 +913,14 @@ func isPluginInEntries(cfg *config.Config, name string) bool {
 	_, ok := cfg.Plugins.Entries[strings.ToLower(name)]
 	return ok
 }
+
+func isStandardProtocol(proto string) bool {
+	switch strings.ToLower(strings.TrimSpace(proto)) {
+	case "tcp", "generic", "":
+		return true
+	default:
+		return false
+	}
+}
+
 

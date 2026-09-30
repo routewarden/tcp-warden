@@ -1,4 +1,4 @@
-# RouteWarden TCP Warden (`tcp-warden`)
+# TCP Warden (`tcp-warden`)
 
 <div align="center">
 
@@ -16,7 +16,7 @@
 
 ## Overview
 
-**RouteWarden TCP Warden** (`tcp-warden`) is a standalone, lightweight, high-performance **Layer 4 security reverse proxy** designed to protect infrastructure services (SSH, SMTP, POP3, IMAP, databases, and raw TCP streams) from brute-force authentication, botnet reconnaissance, volumetric floods, and credential stuffing.
+**TCP Warden** (`tcp-warden`) is a standalone, lightweight, high-performance **Layer 4 security reverse proxy** designed to protect infrastructure services (SSH, SMTP, POP3, IMAP, databases, and raw TCP streams) from brute-force authentication, botnet reconnaissance, volumetric floods, and credential stuffing.
 
 While RouteWarden's HTTP plugins protect web traffic on Traefik, Caddy, and NGINX, `tcp-warden` stands in front of underlying non-HTTP protocols with deep protocol inspection and automatic threat mitigation.
 
@@ -25,7 +25,7 @@ Incoming TCP Connections (SSH :2222, SMTP :2525, POP3 :1110, DB :5433)
                               │
                               ▼
                ┌──────────────────────────────┐
-               │    RouteWarden TCP Warden    │
+               │          TCP Warden          │
                │   ────────────────────────   │
                │ 1. GeoIP Lookup              │
                │ 2. In-Memory Banlist Check   │

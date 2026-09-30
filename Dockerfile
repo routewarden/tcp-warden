@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Multi-stage Dockerfile for RouteWarden TCP Warden
+# Multi-stage Dockerfile for TCP Warden
 #
 # Build-time args injected by docker buildx / goreleaser:
 #   BUILDPLATFORM  – native platform of the builder host  (e.g. linux/amd64)

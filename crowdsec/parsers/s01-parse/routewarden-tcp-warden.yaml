@@ -1,7 +1,7 @@
-# RouteWarden TCP Warden CrowdSec Parser
+# TCP Warden CrowdSec Parser
 # Ingests JSON log lines produced by tcp-warden
 name: routewarden/tcp-warden-logs
-description: "Parse RouteWarden TCP Warden L4 security proxy events"
+description: "Parse TCP Warden L4 security proxy events"
 filter: "evt.Line.Labels.type == 'routewarden-tcp-warden'"
 onsuccess: next_stage
 nodes:

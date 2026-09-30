@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -26,6 +25,7 @@ type Daemon struct {
 	stats     *StatsRegistry
 	bus       *EventBus
 	logger    *LogWriter
+	oplog     *Logger // operational (human-readable) logger
 	crowdsec  *crowdsec.Client
 	pipeline  *Pipeline
 	apiServer *APIServer
@@ -37,6 +37,10 @@ type Daemon struct {
 
 // NewDaemon initializes a Daemon instance from configuration.
 func NewDaemon(cfg *config.Config) (*Daemon, error) {
+	// Wire operational logger immediately so all init steps below can use it.
+	oplog := NewLogger(ParseLevel(cfg.Global.LogLevel), nil)
+	SetDefaultLogger(oplog)
+
 	// 0. Sync plugins declared with a source in configuration (using cache or pulling fresh)
 	for name, entry := range cfg.Plugins.Entries {
 		if entry.Source != "" {
@@ -44,9 +48,9 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 				NoBuild: true,
 			})
 			if err != nil {
-				log.Printf("⚠️  [PLUGIN SYNC] Failed syncing plugin %q from %s: %v", name, entry.Source, err)
+				oplog.Warn("[PLUGIN SYNC] Failed syncing plugin %q from %s: %v", name, entry.Source, err)
 			} else if !res.TestPassed {
-				log.Printf("⚠️  [PLUGIN SYNC] Plugin %q tests FAILED; plugin remains DISABLED", name)
+				oplog.Warn("[PLUGIN SYNC] Plugin %q tests FAILED; plugin remains DISABLED", name)
 			}
 		}
 	}
@@ -88,12 +92,12 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 
 	pluginErrs := plugins.ApplyConfiguration(enabledList, disabledList)
 	for name, err := range pluginErrs {
-		log.Printf("⚠️  [PLUGIN] %q self-test FAILED and remains DISABLED: %v", name, err)
+		oplog.Warn("[PLUGIN] %q self-test FAILED and remains DISABLED: %v", name, err)
 	}
 
 	for _, pInfo := range plugins.List() {
 		if pInfo.Enabled && pInfo.Status == plugins.StatusActive {
-			log.Printf("✓  [PLUGIN] %s (%s) is ACTIVE and healthy", pInfo.Name, pInfo.Version)
+			oplog.Info("✓  [PLUGIN] %s (%s) is ACTIVE and healthy", pInfo.Name, pInfo.Version)
 		}
 	}
 
@@ -106,7 +110,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 			default:
 				if !plugins.IsActive(svc.Protocol) {
 					st, reason, testErr := plugins.GetStatus(svc.Protocol)
-					log.Printf("⚠️  [WARN] Service %q uses protocol %q, but plugin is %s (%s: %v). Inbound connections will be rejected.",
+					oplog.Warn("[WARN] Service %q uses protocol %q, but plugin is %s (%s: %v). Inbound connections will be rejected.",
 						name, svc.Protocol, st, reason, testErr)
 				}
 			}
@@ -126,11 +130,15 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	if cfg.Global.LogFile != "" {
 		l, err := NewLogWriter(cfg.Global.LogFile)
 		if err != nil {
-			log.Printf("⚠️ Warning: could not initialize log file %s: %v (falling back to stdout)", cfg.Global.LogFile, err)
+			oplog.Warn("could not initialize log file %s: %v (falling back to stdout)", cfg.Global.LogFile, err)
 		}
 		logger = l
 	} else {
 		logger, _ = NewLogWriter("")
+	}
+	// Apply the configured level to the security-event JSONL writer too.
+	if logger != nil {
+		logger.SetLevel(ParseLevel(cfg.Global.LogLevel))
 	}
 
 	var cs *crowdsec.Client
@@ -139,6 +147,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 			LAPIURL:        cfg.CrowdSec.LAPIURL,
 			APIKey:         cfg.CrowdSec.APIKey,
 			UpdateInterval: cfg.CrowdSec.UpdateFrequency.Duration(),
+			WarnFunc:       oplog.Warn,
 		})
 	}
 
@@ -157,6 +166,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 		stats:     stats,
 		bus:       bus,
 		logger:    logger,
+		oplog:     oplog,
 		crowdsec:  cs,
 		pipeline:  pipe,
 		apiServer: apiSrv,
@@ -169,7 +179,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// 1. Start CrowdSec sync if enabled
 	if d.crowdsec != nil {
 		if err := d.crowdsec.Start(ctx); err != nil {
-			log.Printf("⚠️ Failed to start CrowdSec sync: %v", err)
+			d.oplog.Warn("Failed to start CrowdSec sync: %v", err)
 		}
 	}
 
@@ -177,7 +187,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.apiServer != nil {
 		go func() {
 			if err := d.apiServer.Start(); err != nil && err != net.ErrClosed {
-				log.Printf("⚠️ API server error: %v", err)
+				d.oplog.Warn("API server error: %v", err)
 			}
 		}()
 	}
@@ -234,7 +244,7 @@ func (d *Daemon) serveService(ctx context.Context, ln net.Listener, svc config.S
 					return
 				}
 				// Transient OS error (e.g. "too many open files") — log and retry.
-				log.Printf("⚠️  [%s] Accept error (retrying in 100ms): %v", svc.Name, err)
+				d.oplog.Warn("[%s] Accept error (retrying in 100ms): %v", svc.Name, err)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
@@ -295,4 +305,3 @@ func removeFromList(list []string, item string) []string {
 	}
 	return res
 }
-

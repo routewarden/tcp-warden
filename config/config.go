@@ -1021,7 +1021,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Global.BanDuration = Duration(1 * time.Hour)
 	}
 	if cfg.Global.LogLevel == "" {
-		cfg.Global.LogLevel = "info"
+		cfg.Global.LogLevel = "warn"
 	}
 	// Note: cfg.Global.LogFile intentionally has no default — file logging is opt-in.
 	// Users who want SIEM/CrowdSec log output must set log_file explicitly in their config.

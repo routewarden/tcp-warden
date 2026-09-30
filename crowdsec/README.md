@@ -1,6 +1,6 @@
-# CrowdSec Integration for RouteWarden TCP Warden
+# CrowdSec Integration for TCP Warden
 
-This directory provides official CrowdSec parsers, scenarios, and acquisition configuration for **RouteWarden TCP Warden**.
+This directory provides official CrowdSec parsers, scenarios, and acquisition configuration for **TCP Warden**.
 
 ## Architecture
 

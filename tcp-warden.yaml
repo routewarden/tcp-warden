@@ -9,7 +9,7 @@ global:
   ban_duration: "1h"
   ban_after_failures: 5
   tarpit_ms: 1000
-  log_level: "info"
+  log_level: "warn"
   log_file: "/var/log/routewarden/tcp-warden.jsonl"
   # Directory for persistent runtime state (bans.db SQLite database survives restarts)
   data_dir: "/var/lib/routewarden"

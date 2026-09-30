@@ -1,5 +1,5 @@
 # ==============================================================================
-# RouteWarden TCP Warden - Database Security Bastion Sample
+# TCP Warden - Database Security Bastion Sample
 # ==============================================================================
 # Demonstrates protecting database services (PostgreSQL, MySQL, Redis, MongoDB)
 # with credential brute-force defense, dangerous command filtering, and CIDR controls.
@@ -18,7 +18,7 @@ global:
   ban_duration: "2h"
   ban_after_failures: 3
   tarpit_ms: 2000
-  log_level: "info"
+  log_level: "warn"
   log_file: "/var/log/routewarden/database-bastion.jsonl"
   data_dir: "/var/lib/routewarden"
 

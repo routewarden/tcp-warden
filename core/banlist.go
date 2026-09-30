@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,7 +12,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // BanEntry holds metadata for an actively banned IP address.
@@ -64,7 +63,7 @@ func NewBanList(dataDir string) *BanList {
 
 	if dataDir != "" {
 		if err := bl.initDB(); err != nil {
-			log.Printf("⚠️  [BanList] SQLite/GORM init error for %s: %v (falling back to memory-only)", dataDir, err)
+			DefaultLogger().Warn("[BanList] SQLite/GORM init error for %s: %v (falling back to memory-only)", dataDir, err)
 		} else {
 			bl.migrateLegacyJSON()
 			bl.load()
@@ -82,7 +81,7 @@ func (b *BanList) initDB() error {
 
 	dbPath := filepath.Join(b.dataDir, dbFilename)
 	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
 		return fmt.Errorf("open sqlite via gorm %s: %w", dbPath, err)
@@ -126,7 +125,7 @@ func (b *BanList) migrateLegacyJSON() {
 
 	var entries []BanEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		log.Printf("⚠️  [BanList] corrupt legacy %s: %v", legacyPath, err)
+		DefaultLogger().Warn("[BanList] corrupt legacy %s: %v", legacyPath, err)
 		return
 	}
 
@@ -143,10 +142,10 @@ func (b *BanList) migrateLegacyJSON() {
 	if len(toInsert) > 0 {
 		err := b.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&toInsert).Error
 		if err == nil {
-			log.Printf("✓  [BanList] migrated %d ban(s) from legacy %s into SQLite via GORM", len(toInsert), legacyPath)
+			DefaultLogger().Info("✓  [BanList] migrated %d ban(s) from legacy %s into SQLite via GORM", len(toInsert), legacyPath)
 			_ = os.Rename(legacyPath, legacyPath+".migrated.bak")
 		} else {
-			log.Printf("⚠️  [BanList] GORM migration error: %v", err)
+			DefaultLogger().Warn("[BanList] GORM migration error: %v", err)
 		}
 	}
 }
@@ -161,7 +160,7 @@ func (b *BanList) load() {
 	var records []BanEntry
 	err := b.db.Where("permanent = ? OR expires_at > ?", true, now).Find(&records).Error
 	if err != nil {
-		log.Printf("⚠️  [BanList] GORM query bans error: %v", err)
+		DefaultLogger().Warn("[BanList] GORM query bans error: %v", err)
 		return
 	}
 
@@ -173,7 +172,7 @@ func (b *BanList) load() {
 	}
 
 	if len(records) > 0 {
-		log.Printf("✓  [BanList] loaded %d active ban(s) from SQLite (%s)", len(records), filepath.Join(b.dataDir, dbFilename))
+		DefaultLogger().Info("✓  [BanList] loaded %d active ban(s) from SQLite (%s)", len(records), filepath.Join(b.dataDir, dbFilename))
 	}
 }
 
@@ -205,7 +204,7 @@ func (b *BanList) Ban(ip, reason, service string, duration time.Duration) {
 			UpdateAll: true,
 		}).Create(&entry).Error
 		if err != nil {
-			log.Printf("⚠️  [BanList] GORM upsert error for %s: %v", ip, err)
+			DefaultLogger().Warn("[BanList] GORM upsert error for %s: %v", ip, err)
 		}
 	}
 }
@@ -222,7 +221,7 @@ func (b *BanList) Unban(ip string) bool {
 	if b.db != nil {
 		tx := b.db.Where("ip = ?", ip).Delete(&BanEntry{})
 		if tx.Error != nil {
-			log.Printf("⚠️  [BanList] GORM delete error for %s: %v", ip, tx.Error)
+			DefaultLogger().Warn("[BanList] GORM delete error for %s: %v", ip, tx.Error)
 		} else if !exists && tx.RowsAffected > 0 {
 			exists = true
 		}
@@ -309,7 +308,7 @@ func (b *BanList) cleanupLoop(ctx context.Context) {
 
 			if b.db != nil {
 				if err := b.db.Where("permanent = ? AND expires_at <= ?", false, now).Delete(&BanEntry{}).Error; err != nil {
-					log.Printf("⚠️  [BanList] GORM prune error: %v", err)
+					DefaultLogger().Warn("[BanList] GORM prune error: %v", err)
 				}
 			}
 		}

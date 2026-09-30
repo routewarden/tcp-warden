@@ -1,5 +1,5 @@
 # ==============================================================================
-# RouteWarden TCP Warden - Local Testing Configuration
+# TCP Warden - Local Testing Configuration
 # ==============================================================================
 # Optimized for zero-setup, offline local testing.
 # - Fast 30-second TTL for rapid auto-ban and expiration testing.

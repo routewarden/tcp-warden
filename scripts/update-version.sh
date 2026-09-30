@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/update-version.sh
-# RouteWarden TCP Warden version update and synchronization script.
+# TCP Warden version update and synchronization script.
 #
 # Usage:
 #   ./scripts/update-version.sh              # Reads version directly from version.json and syncs files
@@ -64,7 +64,7 @@ fi
 
 SEMVER_NO_V="${TARGET_VERSION#v}"
 
-echo "🔄 Synchronizing RouteWarden TCP Warden version: ${TARGET_VERSION} (${SEMVER_NO_V})"
+echo "🔄 Synchronizing TCP Warden version: ${TARGET_VERSION} (${SEMVER_NO_V})"
 
 UPDATED_COUNT=0
 

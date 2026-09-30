@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# RouteWarden TCP Warden - Local Testing & Verification Script
+# TCP Warden - Local Testing & Verification Script
 # ==============================================================================
 # Tests daemon management API, listeners, banlist enforcement, and stats.
 #
@@ -19,7 +19,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-echo -e "${BOLD}${CYAN}=== RouteWarden TCP Warden Local Test Runner ===${NC}"
+echo -e "${BOLD}${CYAN}=== TCP Warden Local Test Runner ===${NC}"
 echo -e "Target API: ${YELLOW}${API_URL}${NC}\n"
 
 # 1. Health check

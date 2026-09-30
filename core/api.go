@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +16,14 @@ import (
 	"github.com/routewarden/tcp-warden/config"
 	"github.com/routewarden/tcp-warden/crowdsec"
 )
+
+// writeJSONError writes a JSON-formatted error response without overriding the Content-Type header.
+// http.Error() must NOT be used inside wrapJSON handlers because it unconditionally resets
+// Content-Type to "text/plain; charset=utf-8", even when the body is JSON.
+func writeJSONError(w http.ResponseWriter, msg string, code int) {
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `{"error":%q}`, msg)
+}
 
 // APIServer serves management, metrics, and SSE event streaming over TCP and/or Unix sockets.
 type APIServer struct {
@@ -126,19 +133,19 @@ func (a *APIServer) Start() error {
 
 		ln, err := net.Listen("unix", unixPath)
 		if err != nil {
-			log.Printf("⚠️  [API] Failed to create unix socket listener on %s: %v", unixPath, err)
+			DefaultLogger().Warn("[API] Failed to create unix socket listener on %s: %v", unixPath, err)
 		} else {
 			mode := a.cfg.API.FileMode()
 			if err := os.Chmod(unixPath, mode); err != nil {
 				if errors.Is(err, syscall.EINVAL) {
-					log.Printf("⚠️  [API] Socket chmod %04o not supported on this filesystem (e.g. Docker Desktop VM mount): %s", mode, unixPath)
+					DefaultLogger().Warn("[API] Socket chmod %04o not supported on this filesystem (e.g. Docker Desktop VM mount): %s", mode, unixPath)
 				} else {
-					log.Printf("⚠️  [API] Failed to chmod %04o on %s: %v", mode, unixPath, err)
+					DefaultLogger().Warn("[API] Failed to chmod %04o on %s: %v", mode, unixPath, err)
 				}
 			}
 			listeners = append(listeners, ln)
 			sockPaths = append(sockPaths, unixPath)
-			log.Printf("✓  [API] Listening on unix socket %s (mode %04o)", unixPath, mode)
+			DefaultLogger().Info("✓  [API] Listening on unix socket %s (mode %04o)", unixPath, mode)
 		}
 	}
 
@@ -149,10 +156,10 @@ func (a *APIServer) Start() error {
 			if len(listeners) == 0 {
 				return fmt.Errorf("starting API TCP listener on %s: %w", tcpAddr, err)
 			}
-			log.Printf("⚠️  [API] Failed to listen on TCP %s: %v", tcpAddr, err)
+			DefaultLogger().Warn("[API] Failed to listen on TCP %s: %v", tcpAddr, err)
 		} else {
 			listeners = append(listeners, ln)
-			log.Printf("✓  [API] Listening on TCP http://%s", tcpAddr)
+			DefaultLogger().Info("✓  [API] Listening on TCP http://%s", tcpAddr)
 		}
 	}
 
@@ -271,7 +278,7 @@ func (a *APIServer) handleBanlist(w http.ResponseWriter, r *http.Request) {
 
 func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		writeJSONError(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -279,13 +286,13 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 		IP string `json:"ip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
 	req.IP = strings.TrimSpace(req.IP)
 	if req.IP == "" || net.ParseIP(req.IP) == nil {
-		http.Error(w, `{"error":"invalid or missing ip"}`, http.StatusBadRequest)
+		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
 	}
 
@@ -298,7 +305,7 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 
 func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		writeJSONError(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -308,22 +315,24 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 		Duration string `json:"duration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
 	req.IP = strings.TrimSpace(req.IP)
 	if req.IP == "" || net.ParseIP(req.IP) == nil {
-		http.Error(w, `{"error":"invalid or missing ip"}`, http.StatusBadRequest)
+		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
 	}
 
 	dur := a.cfg.Global.BanDuration.Duration()
 	if req.Duration != "" {
 		parsed, err := time.ParseDuration(req.Duration)
-		if err == nil {
-			dur = parsed
+		if err != nil {
+			writeJSONError(w, fmt.Sprintf("invalid duration %q: use Go duration format e.g. '2h', '30m', '1h30m'", req.Duration), http.StatusBadRequest)
+			return
 		}
+		dur = parsed
 	}
 
 	reason := req.Reason

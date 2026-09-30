@@ -50,6 +50,7 @@ type Client struct {
 	apiKey         string
 	updateInterval time.Duration
 	httpClient     *http.Client
+	warnf          func(format string, args ...any)
 
 	ipDecisions    map[string]DecisionResult // ip -> decision
 	rangeDecisions map[string]rangeItem      // cidr -> item
@@ -66,6 +67,9 @@ type Config struct {
 	APIKey         string
 	UpdateInterval time.Duration
 	HTTPClient     *http.Client
+	// WarnFunc is called for non-fatal warnings (e.g. sync failures).
+	// Defaults to log.Printf when nil.
+	WarnFunc func(format string, args ...any)
 }
 
 // NewClient creates a new CrowdSec bouncer client.
@@ -78,11 +82,16 @@ func NewClient(cfg Config) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	warnf := cfg.WarnFunc
+	if warnf == nil {
+		warnf = func(format string, args ...any) { log.Printf("⚠️ "+format, args...) }
+	}
 	return &Client{
 		lapiURL:        strings.TrimRight(cfg.LAPIURL, "/"),
 		apiKey:         cfg.APIKey,
 		updateInterval: interval,
 		httpClient:     httpClient,
+		warnf:          warnf,
 		ipDecisions:    make(map[string]DecisionResult),
 		rangeDecisions: make(map[string]rangeItem),
 	}
@@ -102,7 +111,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Initial startup fetch
 	if err := c.sync(true); err != nil {
-		log.Printf("⚠️ CrowdSec initial sync warning (will retry in %s): %v", c.updateInterval, err)
+		c.warnf("CrowdSec initial sync warning (will retry in %s): %v", c.updateInterval, err)
 	}
 
 	go func() {
@@ -114,7 +123,7 @@ func (c *Client) Start(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				if err := c.sync(false); err != nil {
-					log.Printf("⚠️ CrowdSec sync failed: %v", err)
+					c.warnf("CrowdSec sync failed: %v", err)
 				}
 			}
 		}

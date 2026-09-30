@@ -1,7 +1,7 @@
 # Detect rapid connections across multiple services
 type: leaky
 name: routewarden/tcp-portscan
-description: "Detect rapid multi-service connection attempts through RouteWarden TCP Warden"
+description: "Detect rapid multi-service connection attempts through TCP Warden"
 filter: "evt.Meta.log_type == 'tcp_warden_event' && (evt.Meta.action == 'blocked' || evt.Meta.reason == 'rate_limit_exceeded')"
 groupby: "evt.Meta.source_ip"
 capacity: 10

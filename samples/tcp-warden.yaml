@@ -1,5 +1,5 @@
 # ==============================================================================
-# RouteWarden TCP Warden - Sample Configuration
+# TCP Warden - Sample Configuration
 # ==============================================================================
 version: "1.0"
 
@@ -7,7 +7,7 @@ global:
   max_connections: 10000
   ban_duration: "1h"
   ban_after_failures: 5
-  log_level: "info"
+  log_level: "warn"
   log_file: "/var/log/routewarden/tcp-warden.jsonl"
 
 api:

@@ -1,5 +1,5 @@
 # ==============================================================================
-# RouteWarden TCP Warden - Gaming & IoT Protocol Firewall Sample
+# TCP Warden - Gaming & IoT Protocol Firewall Sample
 # ==============================================================================
 # Demonstrates DDoS protection, handshake validation, and connection throttling
 # for game servers (Minecraft) and IoT message brokers (MQTT, AMQP).
@@ -17,7 +17,7 @@ global:
   ban_duration: "1h"
   ban_after_failures: 5
   tarpit_ms: 1000
-  log_level: "info"
+  log_level: "warn"
   log_file: "/var/log/routewarden/gaming-iot.jsonl"
   data_dir: "/var/lib/routewarden"
 

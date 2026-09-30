@@ -1,5 +1,5 @@
 # ==============================================================================
-# RouteWarden TCP Warden - CrowdSec LAPI Bouncer Integration Sample
+# TCP Warden - CrowdSec LAPI Bouncer Integration Sample
 # ==============================================================================
 # Integrates TCP Warden as a native high-performance Layer 4 bouncer for CrowdSec.
 #
@@ -18,7 +18,7 @@ global:
   ban_duration: "1h"
   ban_after_failures: 3
   tarpit_ms: 1500
-  log_level: "info"
+  log_level: "warn"             # "warn" suppresses routine "allowed" events, keeping feed focused on threats
   log_file: "/var/log/routewarden/crowdsec-bouncer.jsonl"
   data_dir: "/var/lib/routewarden"
 

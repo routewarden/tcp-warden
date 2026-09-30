@@ -1,6 +1,6 @@
-# RouteWarden TCP Warden Versioning & Release Guide
+# TCP Warden Versioning & Release Guide
 
-This document describes versioning policies for **RouteWarden TCP Warden** (`github.com/routewarden/tcp-warden`).
+This document describes versioning policies for **TCP Warden** (`github.com/routewarden/tcp-warden`).
 
 ## 1. Single Source of Truth (`version.json`)
 
@@ -8,7 +8,7 @@ The canonical version of TCP Warden is stored in [`version.json`](version.json) 
 
 ```json
 {
-  "version": "v2.0.1"
+  "version": "v2.1.0"
 }
 ```
 

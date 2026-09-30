@@ -2,13 +2,13 @@ package plugins
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/routewarden/tcp-warden/logger"
 	"github.com/routewarden/tcp-warden/plugins/sdk"
 )
 
@@ -126,11 +126,11 @@ func (r *Registry) Register(p sdk.Plugin) {
 	if err := manifest.Validate(); err != nil {
 		status = StatusIncompatible
 		reason = fmt.Sprintf("invalid manifest: %v", err)
-		log.Printf("⚠️  [REGISTRY] Plugin %q manifest validation failed: %v. Disabling.", manifest.Name, err)
+		logger.Default().Warn("[REGISTRY] Plugin %q manifest validation failed: %v. Disabling.", manifest.Name, err)
 	} else if err := CheckCompatibility(manifest); err != nil {
 		status = StatusIncompatible
 		reason = fmt.Sprintf("incompatible manifest version: %v", err)
-		log.Printf("⚠️  [REGISTRY] Plugin %q is incompatible: %v. Disabling.", manifest.Name, err)
+		logger.Default().Warn("[REGISTRY] Plugin %q is incompatible: %v. Disabling.", manifest.Name, err)
 	}
 
 	r.plugins[nameKey] = &entry{
@@ -188,10 +188,8 @@ func (r *Registry) Enable(nameOrProto string) error {
 	}
 
 	// 3. Run self-test without holding any lock (may take up to 3 seconds).
-	start := time.Now()
 	err := ent.plugin.SelfTest()
 	testTime := time.Now()
-	_ = start
 
 	// 4. Commit result under write lock.
 	r.mu.Lock()

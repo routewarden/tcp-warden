@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "2.0.1"
+	version = "2.1.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -72,7 +72,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Print(`RouteWarden TCP Warden - Protocol-Aware L4 Security Proxy
+	fmt.Print(`TCP Warden - Protocol-Aware L4 Security Proxy
 
 Usage:
   tcp-warden [command] [flags]
@@ -181,7 +181,7 @@ func runDaemon(configPath string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("🛡️  Starting RouteWarden TCP Warden...")
+	fmt.Println("🛡️  Starting TCP Warden...")
 	fmt.Printf("   Config: %s\n", configPath)
 	fmt.Printf("   Services (%d):\n", len(cfg.Services))
 	for name, svc := range cfg.Services {
@@ -203,6 +203,7 @@ func runDaemon(configPath string) {
 	if cfg.Global.LogFile != "" {
 		fmt.Printf("   Log file:   %s\n", cfg.Global.LogFile)
 	}
+	fmt.Printf("   Log level:  %s\n", cfg.Global.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -471,7 +472,7 @@ func handlePlugins(args []string) {
 }
 
 func printPluginsUsage() {
-	fmt.Print(`RouteWarden TCP Warden - Modular Protocol Plugins
+	fmt.Print(`TCP Warden - Modular Protocol Plugins
 
 Usage:
   tcp-warden plugins [command] [flags]

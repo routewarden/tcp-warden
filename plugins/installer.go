@@ -543,7 +543,7 @@ func stagePluginSource(source string) (string, bool, error) {
 		source = "https://github.com/routewarden/plugins/" + source
 	}
 
-	// 4. Check if Git / GitHub URL
+	// 5. Check if Git / GitHub URL
 	isGit := strings.HasPrefix(source, "http://") ||
 		strings.HasPrefix(source, "https://") ||
 		strings.HasPrefix(source, "git@") ||

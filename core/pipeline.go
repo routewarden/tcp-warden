@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"time"
@@ -190,7 +189,7 @@ func (p *Pipeline) handlePlugin(
 ) (int64, int64, bool, string) {
 	plugin, ok := plugins.Get(svc.Protocol)
 	if !ok {
-		log.Printf("⚠️ [WARN] Service %q: connection rejected because plugin for protocol %q is not installed",
+		DefaultLogger().Warn("[WARN] Service %q: connection rejected because plugin for protocol %q is not installed",
 			svc.Name, svc.Protocol)
 		p.applyResponse(client, svc, "plugin_not_installed")
 		return 0, 0, true, "plugin_not_installed"
@@ -199,7 +198,7 @@ func (p *Pipeline) handlePlugin(
 	// 1. Verify plugin health status (Auto-disable enforcement)
 	if !plugins.IsActive(svc.Protocol) {
 		status, reason, testErr := plugins.GetStatus(svc.Protocol)
-		log.Printf("⚠️ [WARN] Service %q: connection rejected because plugin %q is %s (%s: %v)",
+		DefaultLogger().Warn("[WARN] Service %q: connection rejected because plugin %q is %s (%s: %v)",
 			svc.Name, plugin.Manifest().Name, status, reason, testErr)
 		p.applyResponse(client, svc, "plugin_disabled")
 		return 0, 0, true, fmt.Sprintf("plugin_disabled: %s", status)
@@ -208,7 +207,7 @@ func (p *Pipeline) handlePlugin(
 	// 2. Instantiate inspector with service options
 	inspector, err := plugin.CreateInspector(svc.GetPluginOptions())
 	if err != nil {
-		log.Printf("⚠️ [WARN] Service %q: failed creating inspector for plugin %q: %v",
+		DefaultLogger().Warn("[WARN] Service %q: failed creating inspector for plugin %q: %v",
 			svc.Name, plugin.Manifest().Name, err)
 		res := protocol.Proxy(client, upstream)
 		return res.BytesIn, res.BytesOut, false, ""

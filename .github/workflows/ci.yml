@@ -67,7 +67,7 @@ jobs:
     steps:
       - name: Publish CI Results Summary
         run: |
-          echo "## 🛡️ RouteWarden TCP Warden CI Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "## 🛡️ TCP Warden CI Validation Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Status | Details |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY

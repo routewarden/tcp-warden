@@ -31,6 +31,7 @@ type Daemon struct {
 	apiServer *APIServer
 
 	listeners []net.Listener
+	udpConns  []*net.UDPConn // tracked for graceful shutdown
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 }
@@ -171,6 +172,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 		pipeline:  pipe,
 		apiServer: apiSrv,
 		listeners: make([]net.Listener, 0),
+		udpConns:  make([]*net.UDPConn, 0),
 	}, nil
 }
 
@@ -198,6 +200,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			continue
 		}
 
+		transport := strings.ToLower(strings.TrimSpace(svc.Transport))
+
 		lHost, ports, err := svc.ListenPorts()
 		if err != nil {
 			d.Stop()
@@ -206,18 +210,39 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 		for _, port := range ports {
 			listenAddr := config.FormatHostPort(lHost, port)
-			ln, err := net.Listen("tcp", listenAddr)
-			if err != nil {
-				d.Stop()
-				return fmt.Errorf("starting listener for service %q on %s: %w", name, listenAddr, err)
+
+			// ── TCP listener (default / "tcp" / "both") ──────────────────
+			if transport != "udp" {
+				ln, err := net.Listen("tcp", listenAddr)
+				if err != nil {
+					d.Stop()
+					return fmt.Errorf("starting TCP listener for service %q on %s: %w", name, listenAddr, err)
+				}
+				d.mu.Lock()
+				d.listeners = append(d.listeners, ln)
+				d.mu.Unlock()
+				d.wg.Add(1)
+				go d.serveService(ctx, ln, svc)
 			}
 
-			d.mu.Lock()
-			d.listeners = append(d.listeners, ln)
-			d.mu.Unlock()
-
-			d.wg.Add(1)
-			go d.serveService(ctx, ln, svc)
+			// ── UDP listener ("udp" / "both") ────────────────────────────
+			if transport == "udp" || transport == "both" {
+				udpAddr, err := net.ResolveUDPAddr("udp", listenAddr)
+				if err != nil {
+					d.Stop()
+					return fmt.Errorf("resolving UDP address for service %q (%s): %w", name, listenAddr, err)
+				}
+				udpConn, err := net.ListenUDP("udp", udpAddr)
+				if err != nil {
+					d.Stop()
+					return fmt.Errorf("starting UDP listener for service %q on %s: %w", name, listenAddr, err)
+				}
+				d.mu.Lock()
+				d.udpConns = append(d.udpConns, udpConn)
+				d.mu.Unlock()
+				d.wg.Add(1)
+				go d.serveUDPService(ctx, udpConn, svc)
+			}
 		}
 	}
 
@@ -263,6 +288,11 @@ func (d *Daemon) Stop() {
 		ln.Close()
 	}
 	d.listeners = nil
+
+	for _, conn := range d.udpConns {
+		conn.Close()
+	}
+	d.udpConns = nil
 
 	if d.apiServer != nil {
 		d.apiServer.Close()

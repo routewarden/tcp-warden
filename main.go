@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "2.1.0"
+	version = "3.0.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -805,6 +805,8 @@ func handlePluginsList(args []string) {
 		fmt.Println("  • tls-sni:      tcp-warden plugins install https://github.com/routewarden/plugins/tls_sni")
 		fmt.Println("  • mqtt:         tcp-warden plugins install https://github.com/routewarden/plugins/mqtt")
 		fmt.Println("  • minecraft:    tcp-warden plugins install https://github.com/routewarden/plugins/minecraft")
+		fmt.Println("  • dns:          tcp-warden plugins install https://github.com/routewarden/plugins/dns")
+		fmt.Println("  • bittorrent:   tcp-warden plugins install https://github.com/routewarden/plugins/bittorrent")
 		fmt.Println("  • echo-filter:  tcp-warden plugins install https://github.com/routewarden/plugins/echo_filter")
 		return
 	}

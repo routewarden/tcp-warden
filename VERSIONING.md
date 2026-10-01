@@ -8,7 +8,7 @@ The canonical version of TCP Warden is stored in [`version.json`](version.json) 
 
 ```json
 {
-  "version": "v2.1.0"
+  "version": "v3.0.0"
 }
 ```
 

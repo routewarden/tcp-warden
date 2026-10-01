@@ -720,13 +720,30 @@ type TLSSpecificConfig struct {
 	BlockedDomains []string `yaml:"blocked_domains"`
 }
 
-// ServiceConfig defines a single TCP proxy service.
+// UDPConfig defines per-service tuning parameters for UDP transport.
+type UDPConfig struct {
+	// SessionTimeout is how long a UDP session may be idle before it is reaped.
+	// Defaults to 30s when unset.
+	SessionTimeout Duration `yaml:"session_timeout"`
+
+	// MaxSessions caps the number of concurrent UDP sessions from unique clients.
+	// 0 (default) means unlimited.
+	MaxSessions int `yaml:"max_sessions"`
+
+	// ReadBufferSize is the per-datagram read buffer in bytes (default: 65535).
+	ReadBufferSize int `yaml:"read_buffer_size"`
+}
+
+// ServiceConfig defines a single proxy service (TCP, UDP, or both).
 type ServiceConfig struct {
 	Name             string                 `yaml:"-"` // injected from map key
 	Enabled          *bool                  `yaml:"enabled"`
 	Listen           string                 `yaml:"listen"`
 	Upstream         string                 `yaml:"upstream"`
-	Protocol         string                 `yaml:"protocol"` // "ssh" | "smtp" | "pop3" | "imap" | "postgres" | "mysql" | "redis" | "ftp" | "tls" | "tcp"
+	// Transport selects the network transport: "tcp" (default) | "udp" | "both".
+	// "both" binds listeners on both TCP and UDP for the same port (e.g. DNS on :53).
+	Transport        string                 `yaml:"transport"`
+	Protocol         string                 `yaml:"protocol"` // "ssh" | "smtp" | "dns" | ... | "tcp"
 	RateLimit        RateLimitConfig        `yaml:"rate_limit"`
 	IPFilter         IPFilterConfig         `yaml:"ip_filter"`
 	GeoBlock         GeoBlockConfig         `yaml:"geo_block"`
@@ -735,6 +752,7 @@ type ServiceConfig struct {
 	BanDuration      Duration               `yaml:"ban_duration"`
 	Response         ResponseConfig         `yaml:"response"`
 	PluginConfig     map[string]any         `yaml:"plugin_config,omitempty"`
+	UDP              UDPConfig              `yaml:"udp"`
 	SSH              SSHSpecificConfig      `yaml:"ssh"`
 	SMTP             SMTPSpecificConfig     `yaml:"smtp"`
 	POP3             POP3SpecificConfig     `yaml:"pop3"`

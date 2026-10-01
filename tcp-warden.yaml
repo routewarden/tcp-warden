@@ -1,6 +1,6 @@
 # tcp-warden.yaml
 # RouteWarden TCP Security Proxy & L4 Firewall Configuration
-# Schema: https://routewarden.github.io/tcp-warden/tcp-warden.schema.json
+# Schema: https://routewarden.github.io/tcp-warden.schema.json
 
 version: "1.0"
 # Global daemon policy defaults

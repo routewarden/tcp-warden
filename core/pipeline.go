@@ -382,9 +382,18 @@ func (p *Pipeline) emitEvent(
 	bytesOut int64,
 	start time.Time,
 ) {
+	level := "info"
+	switch strings.ToLower(action) {
+	case "blocked", "banned", "throttled":
+		level = "warn"
+	case "error":
+		level = "error"
+	}
+
 	ev := SecurityEvent{
 		Type:        "security_event",
 		Timestamp:   time.Now().UTC(),
+		Level:       level,
 		Plugin:      "tcp-warden",
 		Service:     svc.Name,
 		Protocol:    svc.Protocol,

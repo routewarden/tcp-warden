@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "3.0.0"
+	version = "3.1.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -919,7 +919,7 @@ func isPluginInEntries(cfg *config.Config, name string) bool {
 
 func isStandardProtocol(proto string) bool {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "tcp", "generic", "":
+	case "tcp", "udp", "generic", "":
 		return true
 	default:
 		return false

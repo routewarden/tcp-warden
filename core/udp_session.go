@@ -22,8 +22,10 @@ type UDPSession struct {
 	// Nil when no UDPPlugin is configured for the service.
 	Inspector sdk.UDPInspector
 
-	lastSeen time.Time
-	mu       sync.Mutex
+	lastSeen  time.Time
+	mu        sync.Mutex
+	closeOnce sync.Once
+	onClose   func()
 }
 
 // Touch updates the last-seen timestamp to prevent idle expiry.
@@ -40,22 +42,28 @@ func (s *UDPSession) isIdle(timeout time.Duration) bool {
 	return time.Since(s.lastSeen) > timeout
 }
 
-// close releases upstream resources and notifies any attached inspector.
+// close releases upstream resources and notifies any attached inspector and callback.
 func (s *UDPSession) close() {
-	if s.Upstream != nil {
-		s.Upstream.Close()
-	}
-	if s.Inspector != nil {
-		_ = s.Inspector.Close()
-	}
+	s.closeOnce.Do(func() {
+		if s.Upstream != nil {
+			_ = s.Upstream.Close()
+		}
+		if s.Inspector != nil {
+			_ = s.Inspector.Close()
+		}
+		if s.onClose != nil {
+			s.onClose()
+		}
+	})
 }
 
 // UDPSessionTable maps "clientIP:port" → *UDPSession, providing connection tracking
 // for the stateless UDP transport.  A background reaper goroutine expires idle sessions.
 type UDPSessionTable struct {
-	sessions sync.Map
-	timeout  time.Duration
-	stop     chan struct{}
+	sessions  sync.Map
+	timeout   time.Duration
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewUDPSessionTable creates a session table and starts the background idle reaper.
@@ -121,11 +129,13 @@ func (t *UDPSessionTable) Len() int {
 
 // Close stops the reaper and closes all active sessions.
 func (t *UDPSessionTable) Close() {
-	close(t.stop)
-	t.sessions.Range(func(k, v any) bool {
-		t.sessions.Delete(k)
-		v.(*UDPSession).close()
-		return true
+	t.closeOnce.Do(func() {
+		close(t.stop)
+		t.sessions.Range(func(k, v any) bool {
+			t.sessions.Delete(k)
+			v.(*UDPSession).close()
+			return true
+		})
 	})
 }
 

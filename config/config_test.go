@@ -689,3 +689,59 @@ services:
 	}
 }
 
+func TestTCPAndUDPSamePortCoexistence(t *testing.T) {
+	// TCP and UDP on the same port should not conflict
+	validYAML := `
+services:
+  dns_tcp:
+    transport: tcp
+    listen: ":53"
+    upstream: "1.1.1.1:53"
+    protocol: "tcp"
+  dns_udp:
+    transport: udp
+    listen: ":53"
+    upstream: "1.1.1.1:53"
+    protocol: "udp"
+`
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("expected TCP and UDP on same port to coexist, got: %v", err)
+	}
+	if len(cfg.Warnings) > 0 {
+		t.Errorf("unexpected warnings for built-in udp protocol: %v", cfg.Warnings)
+	}
+
+	// Two TCP services on the same port should conflict
+	conflictYAML := `
+services:
+  dns1:
+    transport: tcp
+    listen: ":53"
+    upstream: "1.1.1.1:53"
+  dns2:
+    transport: tcp
+    listen: ":53"
+    upstream: "8.8.8.8:53"
+`
+	_, err = Parse([]byte(conflictYAML))
+	if err == nil || !strings.Contains(err.Error(), "duplicate listen address") {
+		t.Fatalf("expected conflict on duplicate TCP port, got: %v", err)
+	}
+}
+
+func TestResolveUpstreamUDPAddr(t *testing.T) {
+	svc := ServiceConfig{
+		Listen:   ":8000-8005",
+		Upstream: "10.0.0.1:9000-9005",
+	}
+	udpAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8003}
+	resolved, err := svc.ResolveUpstream(udpAddr)
+	if err != nil {
+		t.Fatalf("ResolveUpstream with UDPAddr failed: %v", err)
+	}
+	if resolved != "10.0.0.1:9003" {
+		t.Errorf("expected 10.0.0.1:9003, got %q", resolved)
+	}
+}
+

@@ -277,10 +277,11 @@ func (r *mmdbReader) readNode(node uint32, bit byte) (uint32, error) {
 
 func (r *mmdbReader) resolveData(offset uint32) (string, string, bool) {
 	dataStart := r.dataSection + offset
-	if int(dataStart)+128 >= len(r.buffer) {
+	if int(dataStart) >= len(r.buffer) {
 		return "", "", false
 	}
-	chunk := r.buffer[dataStart : dataStart+256]
+	end := min(int(dataStart) + 256, len(r.buffer))
+	chunk := r.buffer[dataStart:end]
 	idx := bytes.Index(chunk, []byte("iso_code"))
 	if idx != -1 && idx+11 < len(chunk) {
 		code := string(chunk[idx+9 : idx+11])

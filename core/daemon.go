@@ -83,7 +83,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	for _, svc := range cfg.Services {
 		if svc.IsEnabled() {
 			proto := strings.ToLower(strings.TrimSpace(svc.Protocol))
-			if proto != "" && proto != "tcp" && proto != "generic" {
+			if proto != "" && proto != "tcp" && proto != "udp" && proto != "generic" {
 				if !contains(disabledList, proto) && !contains(enabledList, proto) {
 					enabledList = append(enabledList, proto)
 				}
@@ -106,7 +106,7 @@ func NewDaemon(cfg *config.Config) (*Daemon, error) {
 	for name, svc := range cfg.Services {
 		if svc.IsEnabled() {
 			switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
-			case "tcp", "generic", "":
+			case "tcp", "udp", "generic", "":
 				// Standard built-in core protocol
 			default:
 				if !plugins.IsActive(svc.Protocol) {

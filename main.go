@@ -919,7 +919,7 @@ func isPluginInEntries(cfg *config.Config, name string) bool {
 
 func isStandardProtocol(proto string) bool {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "tcp", "generic", "":
+	case "tcp", "udp", "generic", "":
 		return true
 	default:
 		return false

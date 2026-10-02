@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/routewarden/tcp-warden/config"
+	"github.com/routewarden/tcp-warden/geoip"
 )
 
 // ── UDPSessionTable tests ─────────────────────────────────────────────────────
@@ -347,4 +348,85 @@ func udpTestConn() (*net.UDPConn, func()) {
 		return nil, func() {}
 	}
 	return conn, func() { conn.Close() }
+}
+
+func TestUDPEngine_MetricsLifecycle(t *testing.T) {
+	stats := NewStatsRegistry()
+	st := stats.GetOrCreate("udp-svc")
+	table := NewUDPSessionTable(5 * time.Second)
+	defer table.Close()
+
+	if st.Snapshot().ActiveConnections != 0 {
+		t.Fatalf("expected 0 active connections initially, got %d", st.Snapshot().ActiveConnections)
+	}
+
+	key := "127.0.0.1:54321"
+	fakeConn, cleanup := udpTestConn()
+	defer cleanup()
+
+	session, isNew, err := table.GetOrCreate(key, func() (*UDPSession, error) {
+		return &UDPSession{
+			ClientAddr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321},
+			Upstream:   fakeConn,
+			onClose:    func() { st.ConnClosed() },
+		}, nil
+	})
+	if err != nil || !isNew {
+		t.Fatalf("unexpected GetOrCreate result: isNew=%v, err=%v", isNew, err)
+	}
+	st.ConnAccepted()
+
+	if st.Snapshot().ActiveConnections != 1 {
+		t.Errorf("expected 1 active connection, got %d", st.Snapshot().ActiveConnections)
+	}
+
+	_, isNew2, err := table.GetOrCreate(key, func() (*UDPSession, error) {
+		return nil, nil
+	})
+	if err != nil || isNew2 {
+		t.Fatalf("expected existing session, isNew=%v, err=%v", isNew2, err)
+	}
+	if st.Snapshot().ActiveConnections != 1 {
+		t.Errorf("expected still 1 active connection, got %d", st.Snapshot().ActiveConnections)
+	}
+
+	table.Delete(key)
+	if st.Snapshot().ActiveConnections != 0 {
+		t.Errorf("expected 0 active connections after delete, got %d", st.Snapshot().ActiveConnections)
+	}
+
+	session.close()
+	if st.Snapshot().ActiveConnections != 0 {
+		t.Errorf("expected 0 active connections after double close, got %d", st.Snapshot().ActiveConnections)
+	}
+}
+
+func TestAuthFailure_LogLevel(t *testing.T) {
+	cfg := &config.Config{
+		Global: config.GlobalConfig{
+			BanAfterFailures: 10,
+		},
+		Services: map[string]config.ServiceConfig{
+			"test-svc": {Name: "test-svc", Protocol: "tcp"},
+		},
+	}
+	bus := NewEventBus()
+	defer bus.Close()
+	events, unsub := bus.Subscribe(10)
+	defer unsub()
+
+	pipe := NewPipeline(cfg, NewBanList(""), NewFailureTracker(), NewRateLimiter(), bus, NewStatsRegistry(), nil, nil)
+	pipe.recordAuthFailure(&config.ServiceConfig{Name: "test-svc"}, "1.2.3.4", geoip.GeoResult{})
+
+	select {
+	case ev := <-events:
+		if ev.Action != "auth_failure" {
+			t.Errorf("expected action auth_failure, got %s", ev.Action)
+		}
+		if ev.Level != "warn" {
+			t.Errorf("expected level warn for auth_failure, got %q", ev.Level)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for security event")
+	}
 }

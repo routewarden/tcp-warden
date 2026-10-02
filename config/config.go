@@ -967,6 +967,8 @@ func (s *ServiceConfig) ResolveUpstream(localAddr net.Addr) (string, error) {
 	localPort := 0
 	if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
 		localPort = tcpAddr.Port
+	} else if udpAddr, ok := localAddr.(*net.UDPAddr); ok {
+		localPort = udpAddr.Port
 	} else if localAddr != nil {
 		_, pStr, err := net.SplitHostPort(localAddr.String())
 		if err == nil {
@@ -1065,7 +1067,11 @@ func applyDefaults(cfg *Config) {
 	for name, svc := range cfg.Services {
 		svc.Name = name
 		if svc.Protocol == "" {
-			svc.Protocol = "tcp"
+			if strings.EqualFold(strings.TrimSpace(svc.Transport), "udp") {
+				svc.Protocol = "udp"
+			} else {
+				svc.Protocol = "tcp"
+			}
 		} else {
 			svc.Protocol = strings.ToLower(strings.TrimSpace(svc.Protocol))
 		}
@@ -1126,26 +1132,39 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("service %q: upstream port range size (%d) must match listen port range size (%d) for 1:1 mapping, or specify a single upstream port for many-to-one", name, uSpan, lSpan)
 		}
 
-		for p := lStart; p <= lEnd; p++ {
-			portKey := FormatHostPort(lHost, p)
-			if prev, exists := usedListenPorts[portKey]; exists {
-				return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, portKey, prev)
-			}
-
-			// If wildcard listener (e.g. ":8080" or "0.0.0.0:8080"), conflict with other wildcards
-			if lHost == "" || lHost == "0.0.0.0" || lHost == "::" {
-				anyKey := fmt.Sprintf("*:%d", p)
-				if prev, exists := usedListenPorts[anyKey]; exists {
-					return fmt.Errorf("service %q: duplicate listen address %q (already used by %q)", name, portKey, prev)
-				}
-				usedListenPorts[anyKey] = name
-			}
-
-			usedListenPorts[portKey] = name
+		var transports []string
+		tr := strings.ToLower(strings.TrimSpace(svc.Transport))
+		switch tr {
+		case "udp":
+			transports = []string{"udp"}
+		case "both":
+			transports = []string{"tcp", "udp"}
+		default:
+			transports = []string{"tcp"}
 		}
 
-		switch svc.Protocol {
-		case "ssh", "smtp", "pop3", "imap", "tcp", "generic":
+		for p := lStart; p <= lEnd; p++ {
+			for _, t := range transports {
+				portKey := fmt.Sprintf("%s/%s", t, FormatHostPort(lHost, p))
+				if prev, exists := usedListenPorts[portKey]; exists {
+					return fmt.Errorf("service %q: duplicate listen address %q (%s, already used by %q)", name, FormatHostPort(lHost, p), strings.ToUpper(t), prev)
+				}
+
+				// If wildcard listener (e.g. ":8080" or "0.0.0.0:8080"), conflict with other wildcards
+				if lHost == "" || lHost == "0.0.0.0" || lHost == "::" {
+					anyKey := fmt.Sprintf("%s/*:%d", t, p)
+					if prev, exists := usedListenPorts[anyKey]; exists {
+						return fmt.Errorf("service %q: duplicate listen address %q (%s, already used by %q)", name, FormatHostPort(lHost, p), strings.ToUpper(t), prev)
+					}
+					usedListenPorts[anyKey] = name
+				}
+
+				usedListenPorts[portKey] = name
+			}
+		}
+
+		switch strings.ToLower(strings.TrimSpace(svc.Protocol)) {
+		case "ssh", "smtp", "pop3", "imap", "tcp", "udp", "generic", "":
 			// valid standard built-in protocols
 		default:
 			// Check if supported by registered plugin

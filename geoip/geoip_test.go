@@ -69,3 +69,24 @@ func TestLookupIP(t *testing.T) {
 		t.Errorf("Expected IsPrivate=false for 8.8.8.8")
 	}
 }
+
+func TestMMDBReader_ResolveDataBoundary(t *testing.T) {
+	// Verify resolveData does not panic when offset is near the end of the buffer (between 128 and 256 bytes from end)
+	buf := make([]byte, 300)
+	reader := &mmdbReader{
+		buffer:      buf,
+		dataSection: 100,
+	}
+	// offset 50 -> dataStart = 150. len(buf) = 300. dataStart+256 = 406 > 300.
+	// Previously this paniced with slice bounds out of range.
+	code, name, ok := reader.resolveData(50)
+	if ok {
+		t.Errorf("expected ok=false for empty chunk, got %q, %q", code, name)
+	}
+
+	// Also test offset completely past buffer length
+	code, name, ok = reader.resolveData(300)
+	if ok {
+		t.Errorf("expected ok=false for past buffer chunk, got %q, %q", code, name)
+	}
+}

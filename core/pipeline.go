@@ -150,7 +150,7 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 
 func isStandardProtocol(proto string) bool {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "tcp", "generic", "":
+	case "tcp", "udp", "generic", "":
 		return true
 	default:
 		return false
@@ -382,9 +382,18 @@ func (p *Pipeline) emitEvent(
 	bytesOut int64,
 	start time.Time,
 ) {
+	level := "info"
+	switch strings.ToLower(action) {
+	case "blocked", "banned", "throttled", "auth_failure":
+		level = "warn"
+	case "error":
+		level = "error"
+	}
+
 	ev := SecurityEvent{
 		Type:        "security_event",
 		Timestamp:   time.Now().UTC(),
+		Level:       level,
 		Plugin:      "tcp-warden",
 		Service:     svc.Name,
 		Protocol:    svc.Protocol,

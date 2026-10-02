@@ -10,6 +10,7 @@ import (
 type SecurityEvent struct {
 	Type        string    `json:"type"`                   // always "security_event"
 	Timestamp   time.Time `json:"timestamp"`              // UTC event time
+	Level       string    `json:"level,omitempty"`        // "warn", "info", "error"
 	Plugin      string    `json:"plugin"`                 // "tcp-warden"
 	Service     string    `json:"service"`                // e.g. "ssh", "smtp"
 	Protocol    string    `json:"protocol"`               // "ssh", "smtp", "pop3", "imap", "tcp"

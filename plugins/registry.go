@@ -188,7 +188,7 @@ func (r *Registry) Enable(nameOrProto string) error {
 	}
 
 	// 3. Run self-test without holding any lock (may take up to 3 seconds).
-	err := ent.plugin.SelfTest()
+	err := safeSelfTest(ent.plugin)
 	testTime := time.Now()
 
 	// 4. Commit result under write lock.
@@ -289,7 +289,7 @@ func (r *Registry) RunSelfTests() map[string]sdk.TestResult {
 	outcomes := make([]outcome, 0, len(targets))
 	for _, t := range targets {
 		start := time.Now()
-		err := t.plugin.SelfTest()
+		err := safeSelfTest(t.plugin)
 		dur := time.Since(start)
 
 		res := sdk.TestResult{
@@ -351,7 +351,7 @@ func (r *Registry) RunSelfTest(name string) (sdk.TestResult, error) {
 
 	// 2. Run self-test outside locks
 	start := time.Now()
-	err := p.SelfTest()
+	err := safeSelfTest(p)
 	dur := time.Since(start)
 
 	res := sdk.TestResult{
@@ -524,4 +524,13 @@ func (r *Registry) List() []PluginInfo {
 	})
 
 	return list
+}
+
+func safeSelfTest(p sdk.Plugin) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("plugin panicked during self-test: %v", r)
+		}
+	}()
+	return p.SelfTest()
 }

@@ -86,7 +86,9 @@ func (w *LogWriter) shouldWrite(action string) bool {
 	case "auth_failure":
 		return w.level <= LevelWarn
 	default: // "blocked", "banned", and any future action types
-		return w.level <= LevelError
+		// Use < LevelOff (not <= LevelError) so this remains correct if new
+		// levels are ever inserted between LevelError and LevelOff.
+		return w.level < LevelOff
 	}
 }
 

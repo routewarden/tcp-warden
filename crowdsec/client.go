@@ -148,6 +148,9 @@ func (c *Client) Check(ipStr string) (DecisionResult, bool) {
 	if host, _, err := net.SplitHostPort(ipStr); err == nil {
 		ipStr = host
 	}
+	if idx := strings.IndexByte(ipStr, '%'); idx != -1 {
+		ipStr = ipStr[:idx]
+	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()

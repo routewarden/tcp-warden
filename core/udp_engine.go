@@ -94,6 +94,13 @@ func (d *Daemon) handleUDPPacket(
 		d.pipeline.emitEvent(&svc, clientIP, geo, action, reason, bytesIn, bytesOut, start)
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			block(fmt.Sprintf("panic in udp handler: %v", r))
+			d.oplog.Error("[PANIC] Recovered in UDP packet handler for %s (%s): %v", svc.Name, clientIP, r)
+		}
+	}()
+
 	// ── Stage 1: Active Banlist ───────────────────────────────────────────
 	if ban, isBanned := d.banlist.IsBanned(clientIP); isBanned {
 		block(fmt.Sprintf("banned: %s", ban.Reason))
@@ -163,11 +170,13 @@ func (d *Daemon) handleUDPPacket(
 			}
 		}
 
+		// onClose is intentionally nil here — it will be wired after the session
+		// wins the LoadOrStore race to prevent a spurious ConnClosed() decrement
+		// if this session loses the race and is immediately discarded.
 		return &UDPSession{
 			ClientAddr: clientAddr,
 			Upstream:   upstream,
 			Inspector:  inspector,
-			onClose:    func() { st.ConnClosed() },
 		}, nil
 	})
 	if err != nil {
@@ -176,6 +185,9 @@ func (d *Daemon) handleUDPPacket(
 	}
 
 	if isNew {
+		// Wire the stats callback now that this session has won the race and
+		// is officially owned. ConnAccepted() is called immediately after.
+		session.onClose = func() { st.ConnClosed() }
 		st.ConnAccepted()
 
 		readBufSize := defaultUDPReadBufSize
@@ -238,6 +250,13 @@ func (d *Daemon) forwardUDPReplies(
 	buf := make([]byte, bufSize)
 	clientIP := session.ClientAddr.IP.String()
 	geo := geoip.LookupIP(clientIP)
+
+	defer func() {
+		if r := recover(); r != nil {
+			table.Delete(sessionKey)
+			d.oplog.Error("[PANIC] Recovered in UDP reply forwarder for %s (%s): %v", svc.Name, clientIP, r)
+		}
+	}()
 
 	for {
 		select {

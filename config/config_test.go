@@ -9,6 +9,7 @@ import (
 
 	"github.com/routewarden/tcp-warden/plugins"
 	"github.com/routewarden/tcp-warden/plugins/sdk"
+	"gopkg.in/yaml.v3"
 )
 
 type mockValidationPlugin struct{}
@@ -742,6 +743,51 @@ func TestResolveUpstreamUDPAddr(t *testing.T) {
 	}
 	if resolved != "10.0.0.1:9003" {
 		t.Errorf("expected 10.0.0.1:9003, got %q", resolved)
+	}
+}
+
+// ── Bug #11 (Round 2): SocketMode.UnmarshalYAML must reject invalid octal input ──
+
+func TestSocketMode_UnmarshalYAML_Valid(t *testing.T) {
+	tests := []struct {
+		yamlInput string
+		expected  SocketMode
+	}{
+		{`mode: "0660"`, 0660},
+		{`mode: "0600"`, 0600},
+		{`mode: "0755"`, 0755},
+		{`mode: 0660`, 0660},
+	}
+
+	for _, tc := range tests {
+		var s struct {
+			Mode SocketMode `yaml:"mode"`
+		}
+		if err := yaml.Unmarshal([]byte(tc.yamlInput), &s); err != nil {
+			t.Errorf("unexpected error unmarshaling %q: %v", tc.yamlInput, err)
+		}
+		if s.Mode != tc.expected {
+			t.Errorf("input %q: expected %o, got %o", tc.yamlInput, tc.expected, s.Mode)
+		}
+	}
+}
+
+func TestSocketMode_UnmarshalYAML_Invalid(t *testing.T) {
+	invalidInputs := []string{
+		`mode: "0abc"`,
+		`mode: "999"`,
+		`mode: "0888"`,
+		`mode: "not-an-octal"`,
+	}
+
+	for _, in := range invalidInputs {
+		var s struct {
+			Mode SocketMode `yaml:"mode"`
+		}
+		err := yaml.Unmarshal([]byte(in), &s)
+		if err == nil {
+			t.Errorf("expected error unmarshaling invalid octal %q, but got nil (mode was %o)", in, s.Mode)
+		}
 	}
 }
 

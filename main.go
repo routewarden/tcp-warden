@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "3.1.0"
+	version = "3.2.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -208,12 +208,15 @@ func runDaemon(configPath string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		fmt.Println("\n🛑 Shutting down TCP Warden...")
 		cancel()
+		<-sigCh
+		fmt.Println("\n🛑 Forcefully terminating TCP Warden...")
+		os.Exit(1)
 	}()
 
 	if err := d.Run(ctx); err != nil {
@@ -271,18 +274,43 @@ func handleValidate(args []string) {
 	fmt.Printf("  - SIEM log file: %s\n", cfg.Global.LogFile)
 }
 
+func makeAPIRequest(method, url, token string, body io.Reader) (*http.Response, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token == "" {
+		token = os.Getenv("ROUTEWARDEN_TOKEN")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return client.Do(req)
+}
+
 func handleStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
-	_ = fs.Parse(args)
+	token := fs.String("token", "", "API authentication token")
+	_ = fs.Parse(normalizeArgs(args))
 
 	url := strings.TrimRight(*apiAddr, "/") + "/health"
-	resp, err := http.Get(url)
+	resp, err := makeAPIRequest(http.MethodGet, url, *token, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to connect to TCP Warden daemon at %s: %v\n", url, err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "❌ API returned HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var pretty bytes.Buffer
@@ -296,15 +324,22 @@ func handleStatus(args []string) {
 func handleBanlist(args []string) {
 	fs := flag.NewFlagSet("banlist", flag.ExitOnError)
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
-	_ = fs.Parse(args)
+	token := fs.String("token", "", "API authentication token")
+	_ = fs.Parse(normalizeArgs(args))
 
 	url := strings.TrimRight(*apiAddr, "/") + "/api/banlist"
-	resp, err := http.Get(url)
+	resp, err := makeAPIRequest(http.MethodGet, url, *token, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to connect to TCP Warden daemon: %v\n", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "❌ API returned HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
 
 	var bans []core.BanEntry
 	if err := json.NewDecoder(resp.Body).Decode(&bans); err != nil {
@@ -342,28 +377,38 @@ func handleBanlist(args []string) {
 func handleUnban(args []string) {
 	fs := flag.NewFlagSet("unban", flag.ExitOnError)
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
+	token := fs.String("token", "", "API authentication token")
 	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: tcp-warden unban <ip> [--api <url>]")
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden unban <ip> [--token <token>] [--api <url>]")
 		os.Exit(1)
 	}
 	ip := fs.Args()[0]
 
 	url := strings.TrimRight(*apiAddr, "/") + "/api/unban"
 	bodyBytes, _ := json.Marshal(map[string]string{"ip": ip})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(bodyBytes))
+	resp, err := makeAPIRequest(http.MethodPost, url, *token, bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to connect to TCP Warden daemon: %v\n", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "❌ API returned HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
 	var result struct {
 		Unbanned bool   `json:"unbanned"`
 		IP       string `json:"ip"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to decode response: %v\n", err)
+		os.Exit(1)
+	}
 	if result.Unbanned {
 		fmt.Printf("✓ Successfully unbanned %s\n", ip)
 	} else {
@@ -376,10 +421,11 @@ func handleBan(args []string) {
 	apiAddr := fs.String("api", "http://127.0.0.1:9091", "TCP Warden API URL")
 	reason := fs.String("reason", "manual_admin_ban", "Reason for the ban")
 	duration := fs.String("duration", "1h", "Duration of the ban (e.g. '1h', '30m')")
+	token := fs.String("token", "", "API authentication token")
 	_ = fs.Parse(normalizeArgs(args))
 
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: tcp-warden ban <ip> [--duration 1h] [--reason \"...\"] [--api <url>]")
+		fmt.Fprintln(os.Stderr, "Usage: tcp-warden ban <ip> [--duration 1h] [--reason \"...\"] [--token <token>] [--api <url>]")
 		os.Exit(1)
 	}
 	ip := fs.Args()[0]
@@ -390,7 +436,7 @@ func handleBan(args []string) {
 		"reason":   *reason,
 		"duration": *duration,
 	})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(bodyBytes))
+	resp, err := makeAPIRequest(http.MethodPost, url, *token, bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to connect to TCP Warden daemon: %v\n", err)
 		os.Exit(1)
@@ -405,11 +451,15 @@ func handleBan(args []string) {
 	}
 }
 
+// truncate shortens s to at most maxLen Unicode codepoints.
+// If truncated, the last codepoint is replaced by a single '…' (ellipsis),
+// preserving column-alignment in table output.
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // normalizeArgs moves leading non-flag arguments to the end so flag.FlagSet can parse
@@ -424,8 +474,8 @@ func normalizeArgs(args []string) []string {
 			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				flagName := strings.TrimLeft(arg, "-")
 				switch flagName {
-				case "force", "no-build", "v", "version", "help", "h":
-					// boolean flags, do not consume next token
+				case "force", "no-build", "no-service", "v", "version", "help", "h":
+					// boolean flags — do not consume the next token as a value
 				default:
 					i++
 					flags = append(flags, args[i])
@@ -839,10 +889,13 @@ func handlePluginsList(args []string) {
 }
 
 func handlePluginsTest(args []string) {
+	fs := flag.NewFlagSet("plugins test", flag.ExitOnError)
+	_ = fs.Parse(args)
+
 	fmt.Println("🧪 Executing RouteWarden Plugin Self-Tests...")
 	target := ""
-	if len(args) > 0 {
-		target = args[0]
+	if len(fs.Args()) > 0 {
+		target = fs.Args()[0]
 	}
 
 	if target != "" {

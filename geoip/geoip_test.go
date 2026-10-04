@@ -235,4 +235,19 @@ func TestLookupIP_AddressWithPortAndMalformed(t *testing.T) {
 	}
 }
 
+func TestLookupIP_IPv6ZoneStripping(t *testing.T) {
+	// IPv6 link-local with zone index
+	res1 := LookupIP("fe80::1%eth0")
+	if res1.CountryCode != "LAN" || !res1.IsPrivate {
+		t.Errorf("expected LAN/private for fe80::1%%eth0, got %+v", res1)
+	}
+
+	// IPv6 bracketed link-local with zone index and port
+	res2 := LookupIP("[fe80::1%eth0]:54321")
+	if res2.CountryCode != "LAN" || !res2.IsPrivate {
+		t.Errorf("expected LAN/private for [fe80::1%%eth0]:54321, got %+v", res2)
+	}
+}
+
+
 

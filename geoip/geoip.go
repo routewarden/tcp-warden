@@ -141,7 +141,10 @@ func IsPrivateOrLocal(ip net.IP) bool {
 func cleanIPString(ipStr string) string {
 	ipStr = strings.TrimSpace(ipStr)
 	if host, _, err := net.SplitHostPort(ipStr); err == nil {
-		return host
+		ipStr = host
+	}
+	if idx := strings.IndexByte(ipStr, '%'); idx != -1 {
+		ipStr = ipStr[:idx]
 	}
 	return ipStr
 }

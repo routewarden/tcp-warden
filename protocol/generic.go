@@ -81,3 +81,11 @@ func (b *BufferedConn) CloseWrite() error {
 	}
 	return nil
 }
+
+// CloseRead forwards half-close to the underlying Conn if supported.
+func (b *BufferedConn) CloseRead() error {
+	if cr, ok := b.Conn.(interface{ CloseRead() error }); ok {
+		return cr.CloseRead()
+	}
+	return nil
+}

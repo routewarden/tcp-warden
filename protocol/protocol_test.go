@@ -106,6 +106,35 @@ func TestBufferedConn_CloseWrite(t *testing.T) {
 	}
 }
 
+type mockCloseReaderConn struct {
+	net.Conn
+	closedRead bool
+}
+
+func (m *mockCloseReaderConn) CloseRead() error {
+	m.closedRead = true
+	return nil
+}
+
+func TestBufferedConn_CloseRead(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	mock := &mockCloseReaderConn{Conn: c1}
+	bConn := &BufferedConn{
+		Reader: c1,
+		Conn:   mock,
+	}
+
+	if err := bConn.CloseRead(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.closedRead {
+		t.Errorf("expected CloseRead to be forwarded to mockCloseReaderConn")
+	}
+}
+
 // ── Bug #12 (Round 2): Proxy half-close must not call dst.Close() ──
 
 func TestProxy_HalfCloseNoCloseWriter(t *testing.T) {

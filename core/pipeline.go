@@ -183,11 +183,12 @@ func (p *Pipeline) proxyWithInspection(
 		return res.BytesIn, res.BytesOut, false, ""
 	default:
 		// Route through modular plugin architecture
-		return p.handlePlugin(client, upstream, svc, onFailure, clientIP, geo)
+		return p.handlePlugin(ctx, client, upstream, svc, onFailure, clientIP, geo)
 	}
 }
 
 func (p *Pipeline) handlePlugin(
+	ctx context.Context,
 	client net.Conn,
 	upstream net.Conn,
 	svc *config.ServiceConfig,
@@ -223,6 +224,7 @@ func (p *Pipeline) handlePlugin(
 
 	// 3. Prepare plugin context with security callbacks
 	pCtx := &sdk.DefaultContext{
+		Ctx:             ctx,
 		ServiceName:     svc.Name,
 		ClientAddress:   clientIP,
 		AuthFailureFunc: onFailure,
@@ -425,14 +427,21 @@ func (p *Pipeline) emitEvent(
 }
 
 func parseClientIP(remoteAddr string) string {
+	remoteAddr = strings.TrimSpace(remoteAddr)
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		return host
+		remoteAddr = host
+	}
+	if idx := strings.IndexByte(remoteAddr, '%'); idx != -1 {
+		remoteAddr = remoteAddr[:idx]
 	}
 	return remoteAddr
 }
 
 func matchIP(ip net.IP, pattern string) bool {
 	pattern = strings.TrimSpace(pattern)
+	if idx := strings.IndexByte(pattern, '%'); idx != -1 {
+		pattern = pattern[:idx]
+	}
 	if strings.Contains(pattern, "/") {
 		_, ipNet, err := net.ParseCIDR(pattern)
 		if err == nil {

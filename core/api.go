@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/routewarden/tcp-warden/config"
 	"github.com/routewarden/tcp-warden/crowdsec"
+	"github.com/routewarden/tcp-warden/plugins/sdk"
 )
 
 // writeJSONError writes a JSON-formatted error response without overriding the Content-Type header.
@@ -69,7 +71,7 @@ func NewAPIServer(
 				} else {
 					token = r.URL.Query().Get("token")
 				}
-				if token != api.cfg.API.AuthToken {
+				if subtle.ConstantTimeCompare([]byte(token), []byte(api.cfg.API.AuthToken)) != 1 {
 					writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 					return
 				}
@@ -99,26 +101,32 @@ func NewAPIServer(
 	mux.HandleFunc("/api/guard/health", wrapJSON(api.handleHealth))
 
 	mux.HandleFunc("/api/stats", wrapJSON(api.handleStats))
+	mux.HandleFunc("/api/tcp/stats", wrapJSON(api.handleStats))
 	mux.HandleFunc("/api/guard/stats", wrapJSON(api.handleStats))
 	mux.HandleFunc("/stats", wrapJSON(api.handleStats))
 
 	mux.HandleFunc("/api/services", wrapJSON(api.handleServices))
+	mux.HandleFunc("/api/tcp/services", wrapJSON(api.handleServices))
 	mux.HandleFunc("/api/guard/services", wrapJSON(api.handleServices))
 	mux.HandleFunc("/services", wrapJSON(api.handleServices))
 
 	mux.HandleFunc("/api/banlist", wrapJSON(api.handleBanlist))
+	mux.HandleFunc("/api/tcp/banlist", wrapJSON(api.handleBanlist))
 	mux.HandleFunc("/api/guard/banlist", wrapJSON(api.handleBanlist))
 	mux.HandleFunc("/banlist", wrapJSON(api.handleBanlist))
 
 	mux.HandleFunc("/api/unban", wrapJSON(api.handleUnban))
+	mux.HandleFunc("/api/tcp/unban", wrapJSON(api.handleUnban))
 	mux.HandleFunc("/api/guard/unban", wrapJSON(api.handleUnban))
 	mux.HandleFunc("/unban", wrapJSON(api.handleUnban))
 
 	mux.HandleFunc("/api/ban", wrapJSON(api.handleBan))
+	mux.HandleFunc("/api/tcp/ban", wrapJSON(api.handleBan))
 	mux.HandleFunc("/api/guard/ban", wrapJSON(api.handleBan))
 	mux.HandleFunc("/ban", wrapJSON(api.handleBan))
 
 	mux.HandleFunc("/api/events", requireAuth(api.handleEvents))
+	mux.HandleFunc("/api/tcp/events", requireAuth(api.handleEvents))
 	mux.HandleFunc("/api/guard/events", requireAuth(api.handleEvents))
 	mux.HandleFunc("/events", requireAuth(api.handleEvents))
 
@@ -240,6 +248,13 @@ func (a *APIServer) Close() error {
 	return firstErr
 }
 
+// ServeHTTP implements http.Handler, delegating to the internal server mux.
+func (a *APIServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if a.srv != nil && a.srv.Handler != nil {
+		a.srv.Handler.ServeHTTP(w, r)
+	}
+}
+
 func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := "healthy"
 	csStatus := "disabled"
@@ -255,10 +270,11 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"status":      status,
-		"version":     a.cfg.Version,
-		"plugin":      "tcp-warden",
-		"active_bans": a.banlist.Count(),
+		"status":         status,
+		"version":        sdk.Version,
+		"config_version": a.cfg.Version,
+		"plugin":         "tcp-warden",
+		"active_bans":    a.banlist.Count(),
 		"crowdsec": map[string]any{
 			"status":    csStatus,
 			"decisions": csDecisions,
@@ -312,6 +328,12 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.IP = strings.TrimSpace(req.IP)
+	if host, _, err := net.SplitHostPort(req.IP); err == nil {
+		req.IP = host
+	}
+	if idx := strings.IndexByte(req.IP, '%'); idx != -1 {
+		req.IP = req.IP[:idx]
+	}
 	if req.IP == "" || net.ParseIP(req.IP) == nil {
 		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
@@ -341,6 +363,12 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.IP = strings.TrimSpace(req.IP)
+	if host, _, err := net.SplitHostPort(req.IP); err == nil {
+		req.IP = host
+	}
+	if idx := strings.IndexByte(req.IP, '%'); idx != -1 {
+		req.IP = req.IP[:idx]
+	}
 	if req.IP == "" || net.ParseIP(req.IP) == nil {
 		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
@@ -399,7 +427,9 @@ func (a *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

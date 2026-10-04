@@ -1097,3 +1097,137 @@ func TestServiceStats_ConnClosed_NeverNegative(t *testing.T) {
 	}
 }
 
+func TestParseClientIP_IPv6ZoneStripping(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"fe80::1%eth0", "fe80::1"},
+		{"[fe80::1%eth0]:12345", "fe80::1"},
+		{"fe80::1%en0", "fe80::1"},
+		{"192.168.1.1:8080", "192.168.1.1"},
+		{"192.168.1.1", "192.168.1.1"},
+		{"[::1]:9090", "::1"},
+		{"::1", "::1"},
+		{"   10.0.0.1:443   ", "10.0.0.1"},
+	}
+
+	for _, c := range cases {
+		got := parseClientIP(c.input)
+		if got != c.expected {
+			t.Errorf("parseClientIP(%q) = %q; want %q", c.input, got, c.expected)
+		}
+	}
+
+	// Also verify matchIP handles patterns with %zone
+	parsed := net.ParseIP("fe80::1")
+	if !matchIP(parsed, "fe80::1%eth0") {
+		t.Errorf("matchIP failed to match fe80::1 with fe80::1%%eth0")
+	}
+}
+
+func TestAPI_ConstantTimeAuth_And_HealthVersion(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled:   true,
+			Listen:    "127.0.0.1:0",
+			AuthToken: "top-secret-token-xyz",
+		},
+	}
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	// 1. Missing auth token
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated request, got %d", w.Code)
+	}
+
+	// 2. Incorrect auth token
+	req = httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for wrong token, got %d", w.Code)
+	}
+
+	// 3. Valid auth token
+	req = httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer top-secret-token-xyz")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid token, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var healthResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &healthResp); err != nil {
+		t.Fatalf("failed to unmarshal health response: %v", err)
+	}
+
+	// Verify version reports sdk.Version ("3.2.0") and config_version reports "1.0"
+	if healthResp["version"] != sdk.Version {
+		t.Errorf("expected health version %q, got %q", sdk.Version, healthResp["version"])
+	}
+	if healthResp["config_version"] != "1.0" {
+		t.Errorf("expected health config_version '1.0', got %q", healthResp["config_version"])
+	}
+}
+
+func TestAPI_BanUnban_IPv6Zone(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:0",
+		},
+		Global: config.GlobalConfig{
+			BanDuration: config.Duration(1 * time.Hour),
+		},
+	}
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	// Ban IPv6 with zone
+	banBody := bytes.NewBufferString(`{"ip":"fe80::cafe:babe%eth0","reason":"zone_test","duration":"30m"}`)
+	req := httptest.NewRequest("POST", "/api/tcp/ban", banBody)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from ban, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify banlist has stripped IP "fe80::cafe:babe"
+	if _, isBanned := bl.IsBanned("fe80::cafe:babe"); !isBanned {
+		t.Errorf("expected fe80::cafe:babe to be banned in banlist")
+	}
+
+	// Unban with zone
+	unbanBody := bytes.NewBufferString(`{"ip":"fe80::cafe:babe%eth0"}`)
+	req = httptest.NewRequest("POST", "/api/tcp/unban", unbanBody)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from unban, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if _, isBanned := bl.IsBanned("fe80::cafe:babe"); isBanned {
+		t.Errorf("expected fe80::cafe:babe to be unbanned")
+	}
+}
+
+

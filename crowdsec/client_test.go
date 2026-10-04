@@ -101,3 +101,54 @@ func TestCrowdSecClientSync(t *testing.T) {
 		t.Errorf("expected 1 ip and 1 range decision, got %d and %d", ipCount, rangeCount)
 	}
 }
+
+func TestCrowdSecClient_IPv6ZoneStripping(t *testing.T) {
+	mockResponse := StreamResponse{
+		New: []DecisionItem{
+			{
+				ID:       10,
+				Origin:   "crowdsec",
+				Scenario: "routewarden/ipv6-scan",
+				Scope:    "Ip",
+				Type:     "ban",
+				Value:    "fe80::dead:beef",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(mockResponse)
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+			}
+		}),
+	}
+	client := NewClient(Config{
+		LAPIURL:    "http://mock-crowdsec",
+		HTTPClient: httpClient,
+	})
+	if err := client.sync(true); err != nil {
+		t.Fatalf("sync error: %v", err)
+	}
+
+	// Query with zone identifier
+	dec, ok := client.Check("fe80::dead:beef%eth0")
+	if !ok {
+		t.Fatalf("expected decision for fe80::dead:beef%%eth0")
+	}
+	if dec.Action != "ban" || dec.Scenario != "routewarden/ipv6-scan" {
+		t.Errorf("unexpected decision: %+v", dec)
+	}
+
+	// Query bracketed with port and zone
+	decPort, okPort := client.Check("[fe80::dead:beef%eth0]:12345")
+	if !okPort {
+		t.Fatalf("expected decision for [fe80::dead:beef%%eth0]:12345")
+	}
+	if decPort.Action != "ban" {
+		t.Errorf("unexpected decision: %+v", decPort)
+	}
+}
+

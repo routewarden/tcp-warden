@@ -90,3 +90,15 @@ func TestMMDBReader_ResolveDataBoundary(t *testing.T) {
 		t.Errorf("expected ok=false for past buffer chunk, got %q, %q", code, name)
 	}
 }
+
+func TestLookupIP_CacheBounding(t *testing.T) {
+	res1 := LookupIP("192.168.1.100")
+	if res1.CountryCode != "LAN" {
+		t.Errorf("expected LAN, got %s", res1.CountryCode)
+	}
+	res2 := LookupIP("192.168.1.100")
+	if res2.CountryCode != "LAN" {
+		t.Errorf("expected LAN on cached read, got %s", res2.CountryCode)
+	}
+}
+

@@ -23,8 +23,8 @@ func TestNormalizeArgs(t *testing.T) {
 		},
 		{
 			name:     "boolean flags with positional",
-			input:    []string{"my-plugin", "--force", "--no-build"},
-			expected: []string{"--force", "--no-build", "my-plugin"},
+			input:    []string{"my-plugin", "--force", "--no-build", "--no-service"},
+			expected: []string{"--force", "--no-build", "--no-service", "my-plugin"},
 		},
 		{
 			name:     "flags before positional",
@@ -127,6 +127,36 @@ services:
 
 func resolveAndLoad(path string) (*config.Config, error) {
 	return config.Load(path)
+}
+
+// ── Bug #9: truncate must operate on Unicode codepoints (runes), not raw bytes ──
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{"hello", 10, "hello"},
+		{"hello world", 5, "hell…"},
+		{"exact", 5, "exact"},
+		{"", 5, ""},
+		// Multi-byte Unicode: "你好世界" (4 Chinese characters, 12 bytes)
+		{"你好世界", 3, "你好…"},
+		// Multi-byte Unicode: emojis (4 bytes per codepoint in UTF-8)
+		{"🔒🔑🎁🚀", 3, "🔒🔑…"},
+	}
+
+	for _, tc := range tests {
+		actual := truncate(tc.input, tc.maxLen)
+		if actual != tc.expected {
+			t.Errorf("truncate(%q, %d): expected %q, got %q", tc.input, tc.maxLen, tc.expected, actual)
+		}
+		// In terms of runes: length should never exceed maxLen
+		if runeCount := len([]rune(actual)); runeCount > tc.maxLen {
+			t.Errorf("truncate(%q, %d) produced %d runes, which exceeds maxLen %d", tc.input, tc.maxLen, runeCount, tc.maxLen)
+		}
+	}
 }
 
 

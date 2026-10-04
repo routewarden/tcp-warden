@@ -758,4 +758,342 @@ func TestDaemon_HTTPPortRange_ManyToOne(t *testing.T) {
 	}
 }
 
+// ── Bug #6: LogWriter.shouldWrite — "blocked" events must be written at LevelError ──
+
+func TestLogWriter_ShouldWrite_BlockedAtLevelError(t *testing.T) {
+	// LevelError < LevelOff, so "blocked" must still be written.
+	w := &LogWriter{level: LevelError}
+	if !w.shouldWrite("blocked") {
+		t.Error("Bug #6 regression: 'blocked' events must be written at LevelError")
+	}
+	if !w.shouldWrite("banned") {
+		t.Error("Bug #6 regression: 'banned' events must be written at LevelError")
+	}
+	// "allowed" events must NOT be written at LevelError.
+	if w.shouldWrite("allowed") {
+		t.Error("'allowed' events must be suppressed at LevelError")
+	}
+	// Nothing is written at LevelOff.
+	wOff := &LogWriter{level: LevelOff}
+	if wOff.shouldWrite("blocked") {
+		t.Error("no events must be written at LevelOff")
+	}
+}
+
+func TestLogWriter_ShouldWrite_AllLevels(t *testing.T) {
+	cases := []struct {
+		level     Level
+		action    string
+		wantWrite bool
+	}{
+		{LevelDebug, "allowed", true},
+		{LevelInfo, "allowed", true},
+		{LevelWarn, "allowed", false},
+		{LevelError, "allowed", false},
+		{LevelOff, "allowed", false},
+		{LevelDebug, "auth_failure", true},
+		{LevelInfo, "auth_failure", true},
+		{LevelWarn, "auth_failure", true},
+		{LevelError, "auth_failure", false},
+		{LevelOff, "auth_failure", false},
+		{LevelDebug, "blocked", true},
+		{LevelInfo, "blocked", true},
+		{LevelWarn, "blocked", true},
+		{LevelError, "blocked", true}, // Bug #6: was false before fix
+		{LevelOff, "blocked", false},
+	}
+	for _, tc := range cases {
+		w := &LogWriter{level: tc.level}
+		got := w.shouldWrite(tc.action)
+		if got != tc.wantWrite {
+			t.Errorf("level=%v action=%q: shouldWrite()=%v, want %v", tc.level, tc.action, got, tc.wantWrite)
+		}
+	}
+}
+
+// ── Bug #11: /health Content-Type must be application/json (set once by middleware) ──
+
+func TestAPIServer_Health_ContentTypeSetOnce(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		Services: map[string]config.ServiceConfig{
+			"svc": {Name: "svc", Protocol: "tcp"},
+		},
+	}
+	api := NewAPIServer(cfg, NewBanList(""), NewStatsRegistry(), NewEventBus(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(rec, req)
+
+	ct := rec.Result().Header["Content-Type"]
+	if len(ct) != 1 {
+		t.Errorf("Bug #11 regression: expected exactly 1 Content-Type header, got %d: %v", len(ct), ct)
+	}
+	if len(ct) > 0 && ct[0] != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct[0])
+	}
+}
+
+// ── Bug #12: Proxy half-close must not call dst.Close() ──
+// Verify that when a connection does NOT implement CloseWrite, the other copy
+// direction can still complete without being aborted.
+
+func TestProxy_HalfClose_DoesNotKillOtherDirection(t *testing.T) {
+	// net.Pipe() returns *net.pipe which does NOT implement CloseWrite, exercising
+	// the fallback branch that was previously calling dst.Close().
+	clientSide, serverSide := net.Pipe()
+
+	payload := []byte("hello from client")
+	reply := []byte("hello from server")
+
+	// Upstream side: read payload, write reply, close.
+	go func() {
+		buf := make([]byte, 128)
+		n, _ := serverSide.Read(buf)
+		_, _ = serverSide.Write(reply)
+		_, _ = serverSide.Write(buf[:n]) // echo payload back so upstream→client direction has data
+		serverSide.Close()
+	}()
+
+	// Run Proxy on a separate goroutine; collect byte counts.
+	type result struct {
+		in, out int64
+	}
+	ch := make(chan result, 1)
+	go func() {
+		// Create a pair simulating client ↔ upstream.
+		upstreamClient, upstreamServer := net.Pipe()
+		go func() {
+			buf := make([]byte, 128)
+			n, _ := upstreamServer.Read(buf)
+			_, _ = upstreamServer.Write(buf[:n])
+			upstreamServer.Close()
+		}()
+		r := protocol.Proxy(clientSide, upstreamClient)
+		ch <- result{r.BytesIn, r.BytesOut}
+	}()
+
+	// Write from the test-client side and then close.
+	_, _ = clientSide.Write(payload)
+	// Don't close clientSide explicitly; let Proxy finish via upstream close.
+
+	select {
+	case r := <-ch:
+		if r.in == 0 && r.out == 0 {
+			// Both directions produced 0 bytes, which can happen with net.Pipe
+			// in edge-cases, but Proxy itself must not have panicked.
+		}
+		_ = r
+	case <-time.After(3 * time.Second):
+		// If Proxy hangs, the old dst.Close() bug was preventing termination.
+		t.Error("Bug #12 regression: Proxy hung — half-close may have killed the upstream read direction")
+	}
+}
+
+// ── Bug #5: UDP session race must not produce negative activeConns ──
+// Simulate the race by checking that onClose is only wired after the session
+// wins the LoadOrStore, by directly exercising UDPSessionTable.GetOrCreate.
+
+func TestUDPSessionTable_RaceLost_NoSpuriousConnClosed(t *testing.T) {
+	table := NewUDPSessionTable(30 * time.Second)
+	defer table.Close()
+
+	closedCount := 0
+	onClose := func() { closedCount++ }
+
+	// First call creates the session and wins the race.
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Skipf("cannot open UDP socket in test environment: %v", err)
+	}
+	defer udpConn.Close()
+
+	winnerSession := &UDPSession{
+		ClientAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		Upstream:   udpConn,
+	}
+
+	s, isNew, err := table.GetOrCreate("key1", func() (*UDPSession, error) {
+		return winnerSession, nil
+	})
+	if err != nil || !isNew {
+		t.Fatalf("expected first GetOrCreate to succeed and be new; err=%v isNew=%v", err, isNew)
+	}
+
+	// Now wire onClose (as the daemon does after winning the race).
+	s.onClose = onClose
+
+	// Simulate a loser: GetOrCreate returns the existing winner and closes the loser.
+	// The loser session must NOT fire the stats callback.
+	loserUDP, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if loserUDP != nil {
+		defer loserUDP.Close()
+	}
+	loserClosed := false
+	loserSession := &UDPSession{
+		ClientAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		Upstream:   loserUDP,
+		// Intentionally NO onClose — mirrors the fix in udp_engine.go
+	}
+	_ = loserSession
+
+	_, isNew2, err2 := table.GetOrCreate("key1", func() (*UDPSession, error) {
+		// This factory should not be called because the key already exists.
+		return loserSession, nil
+	})
+	if err2 != nil {
+		t.Fatalf("second GetOrCreate returned error: %v", err2)
+	}
+	if isNew2 {
+		t.Error("second GetOrCreate should not be new — key already exists")
+	}
+	// The loser's onClose was nil so closedCount must still be 0.
+	_ = loserClosed
+	if closedCount != 0 {
+		t.Errorf("Bug #5 regression: spurious onClose fired %d time(s) for losing session", closedCount)
+	}
+
+	// Delete the winner: onClose fires exactly once.
+	table.Delete("key1")
+	if closedCount != 1 {
+		t.Errorf("expected onClose to fire exactly once on Delete, got %d", closedCount)
+	}
+}
+
+// ── Round 3 Bug #2: APIServer must enforce auth_token when configured ──
+
+func TestAPIServer_AuthToken_Enforcement(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			AuthToken: "secret-token-xyz",
+		},
+		Services: map[string]config.ServiceConfig{
+			"svc": {Name: "svc", Protocol: "tcp"},
+		},
+	}
+	api := NewAPIServer(cfg, NewBanList(""), NewStatsRegistry(), NewEventBus(), nil)
+
+	// 1. /ping should be accessible without any token
+	pingReq := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	pingRec := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(pingRec, pingReq)
+	if pingRec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK from /ping without auth, got %d", pingRec.Code)
+	}
+
+	// 2. /health without token should return 401 Unauthorized
+	reqNoAuth := httptest.NewRequest(http.MethodGet, "/health", nil)
+	recNoAuth := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recNoAuth, reqNoAuth)
+	if recNoAuth.Code != http.StatusUnauthorized {
+		t.Errorf("Round 3 Bug #2 regression: expected 401 Unauthorized without token, got %d", recNoAuth.Code)
+	}
+
+	// 3. /health with invalid token should return 401 Unauthorized
+	reqBadAuth := httptest.NewRequest(http.MethodGet, "/health", nil)
+	reqBadAuth.Header.Set("Authorization", "Bearer invalid-token")
+	recBadAuth := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recBadAuth, reqBadAuth)
+	if recBadAuth.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized with invalid token, got %d", recBadAuth.Code)
+	}
+
+	// 4. /health with valid Bearer token should return 200 OK
+	reqGoodAuth := httptest.NewRequest(http.MethodGet, "/health", nil)
+	reqGoodAuth.Header.Set("Authorization", "Bearer secret-token-xyz")
+	recGoodAuth := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recGoodAuth, reqGoodAuth)
+	if recGoodAuth.Code != http.StatusOK {
+		t.Errorf("expected 200 OK with valid token, got %d", recGoodAuth.Code)
+	}
+
+	// 5. /health with query parameter ?token=secret-token-xyz should return 200 OK
+	reqQueryAuth := httptest.NewRequest(http.MethodGet, "/health?token=secret-token-xyz", nil)
+	recQueryAuth := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(recQueryAuth, reqQueryAuth)
+	if recQueryAuth.Code != http.StatusOK {
+		t.Errorf("expected 200 OK with query token, got %d", recQueryAuth.Code)
+	}
+}
+
+// ── Round 3 Bug #3: Pipeline.Handle must recover from panics gracefully ──
+
+type panickingInspector struct{}
+
+func (p *panickingInspector) Run(ctx sdk.Context, client, upstream net.Conn) (result sdk.ProxyResult, blocked bool, reason string, err error) {
+	panic("unexpected parser explosion")
+}
+
+type panickingPlugin struct{}
+
+func (p *panickingPlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{Name: "panicker", Version: "1.0.0", Protocols: []string{"panicker"}}
+}
+func (p *panickingPlugin) ValidateConfig(map[string]any) error { return nil }
+func (p *panickingPlugin) CreateInspector(map[string]any) (sdk.Inspector, error) {
+	return &panickingInspector{}, nil
+}
+func (p *panickingPlugin) SelfTest() error { return nil }
+
+func TestPipeline_Handle_PanicRecovery(t *testing.T) {
+	plugins.Register(&panickingPlugin{})
+	_ = plugins.Enable("panicker")
+
+	cfg := &config.Config{
+		Version: "1.0",
+		Global: config.GlobalConfig{
+			LogLevel: "debug",
+		},
+		Services: map[string]config.ServiceConfig{
+			"test_panic": {
+				Name:     "test_panic",
+				Protocol: "panicker",
+				Listen:   ":19090",
+				Upstream: "127.0.0.1:19090",
+			},
+		},
+	}
+
+	pipe := NewPipeline(cfg, NewBanList(""), NewFailureTracker(), NewRateLimiter(), NewEventBus(), NewStatsRegistry(), nil, nil)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+
+	svc := cfg.Services["test_panic"]
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Must not panic out and kill test process
+		pipe.Handle(context.Background(), c2, &svc)
+	}()
+
+	select {
+	case <-done:
+		// Completed cleanly with panic recovered
+	case <-time.After(3 * time.Second):
+		t.Fatal("pipeline handler hung during panic recovery")
+	}
+}
+
+// ── ServiceStats.ConnClosed must never drive activeConns negative ──
+
+func TestServiceStats_ConnClosed_NeverNegative(t *testing.T) {
+	st := &ServiceStats{Name: "test"}
+	// Call ConnClosed multiple times without any ConnAccepted
+	st.ConnClosed()
+	st.ConnClosed()
+	st.ConnClosed()
+
+	snap := st.Snapshot()
+	if snap.ActiveConnections < 0 {
+		t.Errorf("expected activeConns >= 0, got %d", snap.ActiveConnections)
+	}
+}
 

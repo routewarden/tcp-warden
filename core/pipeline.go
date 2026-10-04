@@ -64,6 +64,14 @@ func (p *Pipeline) Handle(ctx context.Context, conn net.Conn, svc *config.Servic
 	// Stage 1: GeoIP Lookup
 	geo := geoip.LookupIP(clientIP)
 
+	defer func() {
+		if r := recover(); r != nil {
+			st.AddBlocked()
+			p.emitEvent(svc, clientIP, geo, "error", fmt.Sprintf("panic in connection handler: %v", r), 0, 0, start)
+			DefaultLogger().Error("[PANIC] Recovered in connection handler for %s (%s): %v", svc.Name, clientIP, r)
+		}
+	}()
+
 	// Stage 2: Active Banlist Check
 	if ban, isBanned := p.banlist.IsBanned(clientIP); isBanned {
 		st.AddBlocked()

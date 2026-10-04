@@ -149,3 +149,102 @@ func TestBanList_LegacyJSONMigration(t *testing.T) {
 		t.Fatal("expected expired ban 192.168.1.102 to NOT be imported")
 	}
 }
+
+// ── Bug #1: IsBanned must evict expired entries from the in-memory map on read ──
+
+func TestBanList_IsBanned_EvictsExpiredEntryFromMemory(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// Ban with a duration that has already elapsed.
+	bl.Ban("192.0.2.1", "test", "ssh", 1*time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // ensure expiry
+
+	// IsBanned should return false for the expired entry …
+	_, ok := bl.IsBanned("192.0.2.1")
+	if ok {
+		t.Fatal("expected expired ban to return not-banned")
+	}
+
+	// … and the entry must have been removed from the internal map.
+	bl.mu.RLock()
+	_, stillPresent := bl.entries["192.0.2.1"]
+	bl.mu.RUnlock()
+
+	if stillPresent {
+		t.Error("Bug #1 regression: expired entry was not evicted from in-memory map by IsBanned")
+	}
+}
+
+// ── Bug #7: Permanent bans must store the far-future sentinel, not zero time ──
+
+func TestBanList_PermanentBan_StoresFarFutureSentinel(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	bl.Ban("10.0.0.1", "forever", "ssh", 0) // duration <= 0 → permanent
+
+	bl.mu.RLock()
+	entry, ok := bl.entries["10.0.0.1"]
+	bl.mu.RUnlock()
+
+	if !ok {
+		t.Fatal("permanent ban entry not found in map")
+	}
+	if !entry.Permanent {
+		t.Error("expected Permanent=true for a zero-duration ban")
+	}
+	if entry.ExpiresAt.IsZero() {
+		t.Error("Bug #7 regression: permanent ban stored zero ExpiresAt instead of far-future sentinel")
+	}
+	// Sentinel must be in the far future (at least year 9000).
+	if entry.ExpiresAt.Year() < 9000 {
+		t.Errorf("Bug #7 regression: permanent ban ExpiresAt year is %d, expected >= 9000", entry.ExpiresAt.Year())
+	}
+	// Must still be considered banned.
+	if _, banned := bl.IsBanned("10.0.0.1"); !banned {
+		t.Error("permanent ban with far-future sentinel must still be reported as banned")
+	}
+}
+
+// ── Round 3 Bug #1: TOCTOU race in IsBanned must not delete a concurrently added ban ──
+
+func TestBanList_IsBanned_ConcurrentRefreshUnderLockUpgrade(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// Seed with an expired ban
+	expiredTime := time.Now().Add(-10 * time.Minute)
+	bl.mu.Lock()
+	bl.entries["198.51.100.1"] = BanEntry{
+		IP:        "198.51.100.1",
+		Reason:    "old_expired",
+		ExpiresAt: expiredTime,
+		Permanent: false,
+	}
+	bl.mu.Unlock()
+
+	// Concurrently ban the IP with a fresh unexpired ban
+	freshExpiry := time.Now().Add(1 * time.Hour)
+	bl.Ban("198.51.100.1", "fresh_ban", "ssh", 1*time.Hour)
+
+	entry, banned := bl.IsBanned("198.51.100.1")
+	if !banned {
+		t.Fatal("Round 3 Bug #1 regression: fresh ban was reported as not banned")
+	}
+	if entry.Reason != "fresh_ban" {
+		t.Errorf("expected reason 'fresh_ban', got %q", entry.Reason)
+	}
+	if entry.ExpiresAt.Before(freshExpiry.Add(-10 * time.Second)) {
+		t.Errorf("expected fresh ExpiresAt, got %v", entry.ExpiresAt)
+	}
+
+	// Verify the ban is still in memory
+	bl.mu.RLock()
+	_, inMap := bl.entries["198.51.100.1"]
+	bl.mu.RUnlock()
+	if !inMap {
+		t.Error("Round 3 Bug #1 regression: newly refreshed ban was incorrectly evicted from memory")
+	}
+}
+

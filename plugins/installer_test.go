@@ -447,3 +447,64 @@ func BrokenSyntax() {
 		t.Errorf("expected target directory to be removed on compilation failure, but it exists")
 	}
 }
+
+func TestUninstallPlugin_InvalidNameDoesNotWipeDirectory(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-uninstall-safe-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	targetPluginsDir := filepath.Join(tmpDir, "plugins")
+	_ = os.MkdirAll(filepath.Join(targetPluginsDir, "important_plugin"), 0755)
+	_ = os.WriteFile(filepath.Join(targetPluginsDir, "important_plugin", "plugin.go"), []byte("package p"), 0644)
+
+	opts := plugins.InstallOptions{
+		PluginsDir: targetPluginsDir,
+		ProjectDir: tmpDir,
+		NoBuild:    true,
+	}
+
+	// Empty or invalid names must return error and NOT wipe plugins dir
+	for _, badName := range []string{"", "   ", ".", "/", ".."} {
+		if err := plugins.UninstallPlugin(badName, opts); err == nil {
+			t.Errorf("expected UninstallPlugin(%q) to return error, got nil", badName)
+		}
+	}
+
+	// Important plugin must still exist
+	if _, err := os.Stat(filepath.Join(targetPluginsDir, "important_plugin")); os.IsNotExist(err) {
+		t.Fatal("Round 3 Bug #4 regression: UninstallPlugin with empty/invalid name wiped the plugins directory!")
+	}
+}
+
+func TestCreatePlugin_UsesCloseWriteInTemplate(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-create-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	res, err := plugins.CreatePlugin(plugins.CreatePluginOptions{
+		Name:       "temptest",
+		ProjectDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlugin failed: %v", err)
+	}
+
+	inspectorPath := filepath.Join(res.Directory, "inspector.go")
+	content, err := os.ReadFile(inspectorPath)
+	if err != nil {
+		t.Fatalf("failed reading generated inspector.go: %v", err)
+	}
+
+	// Must contain CloseWrite half-close instead of unconditional Close()
+	if !strings.Contains(string(content), "CloseWrite") {
+		t.Errorf("Round 3 Bug #5 regression: generated inspector.go template does not use CloseWrite()")
+	}
+	if strings.Contains(string(content), "_ = client.Close()") || strings.Contains(string(content), "_ = upstream.Close()") {
+		t.Errorf("Round 3 Bug #5 regression: generated template still contains hard client.Close() or upstream.Close()")
+	}
+}
+

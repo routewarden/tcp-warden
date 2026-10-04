@@ -56,12 +56,34 @@ func NewAPIServer(
 
 	mux := http.NewServeMux()
 
-	// Content-Type wrapper
-	wrapJSON := func(h http.HandlerFunc) http.HandlerFunc {
+	// Auth middleware
+	requireAuth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
+			if api.cfg.API.AuthToken != "" {
+				token := ""
+				authHeader := r.Header.Get("Authorization")
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					token = strings.TrimPrefix(authHeader, "Bearer ")
+				} else if authHeader != "" {
+					token = authHeader
+				} else {
+					token = r.URL.Query().Get("token")
+				}
+				if token != api.cfg.API.AuthToken {
+					writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
 			h(w, r)
 		}
+	}
+
+	// Content-Type wrapper
+	wrapJSON := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireAuth(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			h(w, r)
+		})
 	}
 
 	// Routes
@@ -96,9 +118,9 @@ func NewAPIServer(
 	mux.HandleFunc("/api/guard/ban", wrapJSON(api.handleBan))
 	mux.HandleFunc("/ban", wrapJSON(api.handleBan))
 
-	mux.HandleFunc("/api/events", api.handleEvents)
-	mux.HandleFunc("/api/guard/events", api.handleEvents)
-	mux.HandleFunc("/events", api.handleEvents)
+	mux.HandleFunc("/api/events", requireAuth(api.handleEvents))
+	mux.HandleFunc("/api/guard/events", requireAuth(api.handleEvents))
+	mux.HandleFunc("/events", requireAuth(api.handleEvents))
 
 	api.srv = &http.Server{
 		Handler: mux,
@@ -242,7 +264,6 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"decisions": csDecisions,
 		},
 	}
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

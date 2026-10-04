@@ -23,16 +23,26 @@ func Proxy(client, upstream net.Conn) ProxyResult {
 	type closeWriter interface {
 		CloseWrite() error
 	}
+	type closeReader interface {
+		CloseRead() error
+	}
 
 	copy := func(dst, src net.Conn, counter *atomic.Int64) {
 		n, _ := io.Copy(dst, src)
 		counter.Add(n)
-		// Half-close: signal EOF to the other side
+		// Half-close: signal EOF to the peer on the dst side without killing
+		// the concurrent goroutine that is still reading from dst.
 		if cw, ok := dst.(closeWriter); ok {
+			// Preferred path: sends FIN on dst's write half only.
 			_ = cw.CloseWrite()
-		} else {
-			_ = dst.Close()
+		} else if cr, ok := src.(closeReader); ok {
+			// Fallback: close the read half of src so the remote sees EOF,
+			// without disturbing dst's ongoing read in the other goroutine.
+			_ = cr.CloseRead()
 		}
+		// If neither half-close is available, do nothing — the other goroutine
+		// will exit naturally when its io.Copy returns, and defer conn.Close()
+		// in the caller cleans up both connections.
 		done <- struct{}{}
 	}
 

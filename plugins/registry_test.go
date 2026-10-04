@@ -238,3 +238,45 @@ func TestPluginCompatibilityAndAutoDisable(t *testing.T) {
 		t.Errorf("expected future-plugin to remain inactive")
 	}
 }
+
+type dummyPanickingSelfTestPlugin struct{}
+
+func (d *dummyPanickingSelfTestPlugin) Manifest() sdk.Manifest {
+	return sdk.Manifest{
+		Name:        "panic-plugin",
+		Version:     "1.0.0",
+		Description: "A plugin that deliberately panics during self-test",
+		Protocols:   []string{"panic-proto"},
+	}
+}
+func (d *dummyPanickingSelfTestPlugin) ValidateConfig(config map[string]any) error { return nil }
+func (d *dummyPanickingSelfTestPlugin) CreateInspector(config map[string]any) (sdk.Inspector, error) {
+	return nil, nil
+}
+func (d *dummyPanickingSelfTestPlugin) SelfTest() error {
+	panic("fatal synthetic self-test crash")
+}
+
+func TestPluginRegistry_SelfTestPanicRecovery(t *testing.T) {
+	reg := plugins.NewRegistry()
+	reg.Register(&dummyPanickingSelfTestPlugin{})
+
+	// Enable should recover from panic and return an informative error
+	err := reg.Enable("panic-plugin")
+	if err == nil {
+		t.Fatal("expected Enable to fail when self-test panics, got nil")
+	}
+	if !strings.Contains(err.Error(), "panicked during self-test") {
+		t.Errorf("expected error message to mention panic, got %v", err)
+	}
+
+	// Status should be disabled
+	status, reason, _ := reg.GetStatus("panic-plugin")
+	if status != plugins.StatusDisabled {
+		t.Errorf("expected StatusDisabled, got %s", status)
+	}
+	if reason != "self-test failed" {
+		t.Errorf("expected 'self-test failed', got %s", reason)
+	}
+}
+

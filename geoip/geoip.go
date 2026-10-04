@@ -44,6 +44,15 @@ func cacheStore(clean string, res GeoResult) {
 	}
 }
 
+// ResetCache clears the internal GeoIP in-memory cache and resets the counter.
+func ResetCache() {
+	geoCache.Range(func(k, _ any) bool {
+		geoCache.Delete(k)
+		return true
+	})
+	geoCacheCount.Store(0)
+}
+
 // InitGeoIP attempts to locate and load a local MaxMind GeoLite2-Country.mmdb database.
 func InitGeoIP(dbPath ...string) {
 	geoOnce.Do(func() {

@@ -1,8 +1,10 @@
 package geoip
 
 import (
+	"fmt"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestCountryCodeToFlag(t *testing.T) {
@@ -103,18 +105,18 @@ func TestLookupIP_CacheBounding(t *testing.T) {
 }
 
 func TestLookupIP_CacheEvictionThreshold(t *testing.T) {
-	// Populate a known entry
-	resInitial := LookupIP("192.168.200.1")
-	if resInitial.CountryCode != "LAN" {
-		t.Fatalf("expected LAN, got %s", resInitial.CountryCode)
-	}
+	ResetCache()
+	t.Cleanup(func() {
+		ResetCache()
+	})
 
 	// Artificially advance the counter to maxGeoCacheEntries
 	geoCacheCount.Store(maxGeoCacheEntries)
 
-	// Trigger next insert which should trigger eviction of the entire cache and re-insert the newest entry
-	cacheStore("192.168.200.2", GeoResult{
-		IP:          "192.168.200.2",
+	// Trigger next insert for a fresh IP which should trigger eviction of the entire cache and re-insert the newest entry
+	testIP := fmt.Sprintf("192.168.200.%d", time.Now().UnixNano()%250+1)
+	cacheStore(testIP, GeoResult{
+		IP:          testIP,
 		CountryCode: "LAN",
 		CountryName: "Local Network",
 		FlagEmoji:   "🏠",
@@ -128,7 +130,7 @@ func TestLookupIP_CacheEvictionThreshold(t *testing.T) {
 	}
 
 	// Verify the new entry exists in cache
-	if val, ok := geoCache.Load("192.168.200.2"); !ok {
+	if val, ok := geoCache.Load(testIP); !ok {
 		t.Error("expected newly stored key to exist after eviction")
 	} else {
 		res := val.(GeoResult)

@@ -74,6 +74,12 @@ func Register(p sdk.Plugin) {
 // CompareVersions compares two semver version strings (e.g. "1.2.0" and "1.1.5").
 // Returns -1 if v1 < v2, 0 if v1 == v2, and 1 if v1 > v2.
 func CompareVersions(v1, v2 string) int {
+	sv1, err1 := ParseSemVer(v1)
+	sv2, err2 := ParseSemVer(v2)
+	if err1 == nil && err2 == nil {
+		return CompareSemVer(sv1, sv2)
+	}
+
 	v1 = strings.TrimPrefix(strings.TrimSpace(v1), "v")
 	v2 = strings.TrimPrefix(strings.TrimSpace(v2), "v")
 

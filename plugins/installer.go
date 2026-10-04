@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,7 +156,9 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	}
 
 	// ─── Step 3: Compile Plugin Source ──────────────────────────────────
-	compileCmd := exec.Command("go", "test", "-run", "^$", "./...")
+	compileCtx, compileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer compileCancel()
+	compileCmd := exec.CommandContext(compileCtx, "go", "test", "-run", "^$", "./...")
 	compileCmd.Dir = targetDir
 	var compileOut bytes.Buffer
 	compileCmd.Stdout = &compileOut
@@ -178,7 +181,9 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	}
 
 	// ─── Step 4: Run Automated Tests ────────────────────────────────────
-	testCmd := exec.Command("go", "test", "-v", "./...")
+	testCtx, testCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer testCancel()
+	testCmd := exec.CommandContext(testCtx, "go", "test", "-v", "./...")
 	testCmd.Dir = targetDir
 	var testOut bytes.Buffer
 	testCmd.Stdout = &testOut
@@ -211,7 +216,9 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	rebuilt := false
 	if !opts.NoBuild {
 		ensureBuildPrerequisites(opts.ProjectDir)
-		buildCmd := exec.Command("go", "build", "-o", "tcp-warden", ".")
+		buildCtx, buildCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer buildCancel()
+		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", "tcp-warden", ".")
 		buildCmd.Dir = opts.ProjectDir
 		if buildOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
 			_ = unregisterFromAllGo(allGoPath, manifest.Name)
@@ -561,7 +568,9 @@ func stagePluginSource(source string) (string, bool, error) {
 		}
 		defer os.RemoveAll(cloneDir)
 
-		cloneCmd := exec.Command("git", "clone", "--depth", "1", repoURL, cloneDir)
+		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cloneCancel()
+		cloneCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth", "1", repoURL, cloneDir)
 		if out, err := cloneCmd.CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("git clone failed for %s: %v (%s)", repoURL, err, string(out))
 		}
@@ -669,6 +678,10 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 	}
 
 	nameKey := strings.ToLower(strings.TrimSpace(name))
+	if nameKey == "" || nameKey == "." || nameKey == "/" || strings.Contains(nameKey, "..") {
+		return errors.New("invalid or empty plugin name")
+	}
+
 	allGoPath := filepath.Join(opts.PluginsDir, "all", "all.go")
 	_ = unregisterFromAllGo(allGoPath, nameKey)
 
@@ -679,11 +692,14 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 
 	if !opts.NoBuild {
 		ensureBuildPrerequisites(opts.ProjectDir)
-		buildCmd := exec.Command("go", "build", "-o", "tcp-warden", ".")
+		buildCtx, buildCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer buildCancel()
+		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", "tcp-warden", ".")
 		buildCmd.Dir = opts.ProjectDir
-		if err := buildCmd.Run(); err == nil {
-			updateInstalledExecutable(filepath.Join(opts.ProjectDir, "tcp-warden"))
+		if err := buildCmd.Run(); err != nil {
+			return fmt.Errorf("rebuilding tcp-warden binary after uninstall failed: %w", err)
 		}
+		updateInstalledExecutable(filepath.Join(opts.ProjectDir, "tcp-warden"))
 	}
 
 	return nil
@@ -1320,7 +1336,9 @@ func (i *Inspector) Run(ctx sdk.Context, client, upstream net.Conn) (result sdk.
 				break
 			}
 		}
-		_ = client.Close()
+		if cw, ok := client.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 	}()
 
 	// Client -> Upstream
@@ -1341,7 +1359,9 @@ func (i *Inspector) Run(ctx sdk.Context, client, upstream net.Conn) (result sdk.
 				break
 			}
 		}
-		_ = upstream.Close()
+		if cw, ok := upstream.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 	}()
 
 	wg.Wait()

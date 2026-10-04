@@ -41,7 +41,15 @@ func (s *ServiceStats) ConnAccepted() {
 }
 
 func (s *ServiceStats) ConnClosed() {
-	s.activeConns.Add(-1)
+	for {
+		cur := s.activeConns.Load()
+		if cur <= 0 {
+			return
+		}
+		if s.activeConns.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
 }
 
 func (s *ServiceStats) AddAllowed() {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // GeoResult holds resolved country info and location details for an IP.
@@ -19,11 +20,38 @@ type GeoResult struct {
 	IsPrivate   bool   `json:"is_private"`
 }
 
+const maxGeoCacheEntries = 50000
+
 var (
-	geoCache sync.Map // map[string]GeoResult
-	geoOnce  sync.Once
-	mmdb     *mmdbReader
+	geoCache      sync.Map // map[string]GeoResult
+	geoCacheCount atomic.Int64
+	geoOnce       sync.Once
+	mmdb          *mmdbReader
 )
+
+func cacheStore(clean string, res GeoResult) {
+	if _, loaded := geoCache.LoadOrStore(clean, res); !loaded {
+		if geoCacheCount.Add(1) > maxGeoCacheEntries {
+			// Clear cache to prevent unbounded memory growth under spoofed/random IP scans
+			geoCache.Range(func(k, _ any) bool {
+				geoCache.Delete(k)
+				return true
+			})
+			geoCacheCount.Store(0)
+			geoCache.Store(clean, res)
+			geoCacheCount.Store(1)
+		}
+	}
+}
+
+// ResetCache clears the internal GeoIP in-memory cache and resets the counter.
+func ResetCache() {
+	geoCache.Range(func(k, _ any) bool {
+		geoCache.Delete(k)
+		return true
+	})
+	geoCacheCount.Store(0)
+}
 
 // InitGeoIP attempts to locate and load a local MaxMind GeoLite2-Country.mmdb database.
 func InitGeoIP(dbPath ...string) {
@@ -113,7 +141,10 @@ func IsPrivateOrLocal(ip net.IP) bool {
 func cleanIPString(ipStr string) string {
 	ipStr = strings.TrimSpace(ipStr)
 	if host, _, err := net.SplitHostPort(ipStr); err == nil {
-		return host
+		ipStr = host
+	}
+	if idx := strings.IndexByte(ipStr, '%'); idx != -1 {
+		ipStr = ipStr[:idx]
 	}
 	return ipStr
 }
@@ -132,7 +163,7 @@ func LookupIP(ipStr string) GeoResult {
 	parsedIP := net.ParseIP(clean)
 	if parsedIP == nil {
 		res := GeoResult{IP: clean, CountryCode: "XX", CountryName: "Unknown", FlagEmoji: "🌐"}
-		geoCache.Store(clean, res)
+		cacheStore(clean, res)
 		return res
 	}
 
@@ -145,7 +176,7 @@ func LookupIP(ipStr string) GeoResult {
 			FlagEmoji:   "🏠",
 			IsPrivate:   true,
 		}
-		geoCache.Store(clean, res)
+		cacheStore(clean, res)
 		return res
 	}
 
@@ -158,7 +189,7 @@ func LookupIP(ipStr string) GeoResult {
 				CountryName: name,
 				FlagEmoji:   CountryCodeToFlag(code),
 			}
-			geoCache.Store(clean, res)
+			cacheStore(clean, res)
 			return res
 		}
 	}
@@ -170,7 +201,7 @@ func LookupIP(ipStr string) GeoResult {
 		CountryName: "Unknown",
 		FlagEmoji:   "🌐",
 	}
-	geoCache.Store(clean, res)
+	cacheStore(clean, res)
 	return res
 }
 

@@ -265,7 +265,7 @@ func (d *Daemon) serveService(ctx context.Context, ln net.Listener, svc config.S
 				return
 			default:
 				// Fatal: listener was deliberately closed.
-				if errors.Is(err, net.ErrClosed) {
+				if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed") {
 					return
 				}
 				// Transient OS error (e.g. "too many open files") — log and retry.

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 )
 
 type mockCloseWriterConn struct {
@@ -102,5 +103,95 @@ func TestBufferedConn_CloseWrite(t *testing.T) {
 	}
 	if !mock.closedWrite {
 		t.Errorf("expected CloseWrite to be forwarded to mockCloseWriterConn")
+	}
+}
+
+type mockCloseReaderConn struct {
+	net.Conn
+	closedRead bool
+}
+
+func (m *mockCloseReaderConn) CloseRead() error {
+	m.closedRead = true
+	return nil
+}
+
+func TestBufferedConn_CloseRead(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	mock := &mockCloseReaderConn{Conn: c1}
+	bConn := &BufferedConn{
+		Reader: c1,
+		Conn:   mock,
+	}
+
+	if err := bConn.CloseRead(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.closedRead {
+		t.Errorf("expected CloseRead to be forwarded to mockCloseReaderConn")
+	}
+}
+
+// ── Bug #12 (Round 2): Proxy half-close must not call dst.Close() ──
+
+func TestProxy_HalfCloseNoCloseWriter(t *testing.T) {
+	clientConn, proxyClient := net.Pipe()
+	proxyUpstream, upstreamConn := net.Pipe()
+
+	defer clientConn.Close()
+	defer proxyClient.Close()
+	defer proxyUpstream.Close()
+	defer upstreamConn.Close()
+
+	done := make(chan ProxyResult, 1)
+	go func() {
+		done <- Proxy(proxyClient, proxyUpstream)
+	}()
+
+	clientMsg := []byte("ping")
+	upstreamResponse := []byte("pong response from upstream server")
+
+	go func() {
+		// Read client ping, then close read on clientConn
+		buf := make([]byte, len(clientMsg))
+		_, _ = io.ReadFull(upstreamConn, buf)
+
+		// Wait briefly to simulate server processing time while client side is closing
+		time.Sleep(20 * time.Millisecond)
+
+		// Write response back to client
+		_, _ = upstreamConn.Write(upstreamResponse)
+		_ = upstreamConn.Close()
+	}()
+
+	// Client writes ping and then closes its connection to trigger half-close in proxy
+	_, _ = clientConn.Write(clientMsg)
+
+	// In the old buggy code, clientConn's finish triggered proxyUpstream.Close(),
+	// terminating upstreamConn before it could send its response.
+	readBuf := make([]byte, len(upstreamResponse))
+	_, err := io.ReadFull(clientConn, readBuf)
+	if err != nil {
+		t.Fatalf("failed to read response from upstream through proxy: %v", err)
+	}
+	_ = clientConn.Close()
+
+	if !bytes.Equal(readBuf, upstreamResponse) {
+		t.Errorf("expected %q, got %q", string(upstreamResponse), string(readBuf))
+	}
+
+	select {
+	case res := <-done:
+		if res.BytesIn != int64(len(clientMsg)) {
+			t.Errorf("expected BytesIn=%d, got %d", len(clientMsg), res.BytesIn)
+		}
+		if res.BytesOut != int64(len(upstreamResponse)) {
+			t.Errorf("expected BytesOut=%d, got %d", len(upstreamResponse), res.BytesOut)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy timed out waiting for completion")
 	}
 }

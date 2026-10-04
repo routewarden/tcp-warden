@@ -134,7 +134,11 @@ func (b *BanList) migrateLegacyJSON() {
 	for _, e := range entries {
 		if e.Permanent || now.Before(e.ExpiresAt) {
 			e.BannedAt = e.BannedAt.UTC()
-			e.ExpiresAt = e.ExpiresAt.UTC()
+			if e.Permanent && e.ExpiresAt.IsZero() {
+				e.ExpiresAt = permanentBanExpiry
+			} else {
+				e.ExpiresAt = e.ExpiresAt.UTC()
+			}
 			toInsert = append(toInsert, e)
 		}
 	}
@@ -176,13 +180,20 @@ func (b *BanList) load() {
 	}
 }
 
+// permanentBanExpiry is a far-future sentinel stored for permanent bans so the
+// SQLite prune query (`expires_at <= ?`) is safe even if the `permanent` column
+// were accidentally omitted from a future query.
+var permanentBanExpiry = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
 // Ban records an IP address as banned for the given duration.
 // Pass duration <= 0 for a permanent ban.
 func (b *BanList) Ban(ip, reason, service string, duration time.Duration) {
 	now := time.Now().UTC()
 	perm := duration <= 0
 	var expires time.Time
-	if !perm {
+	if perm {
+		expires = permanentBanExpiry
+	} else {
 		expires = now.Add(duration)
 	}
 
@@ -230,17 +241,31 @@ func (b *BanList) Unban(ip string) bool {
 }
 
 // IsBanned returns true and the ban entry if the IP is currently banned and unexpired.
+// Expired entries are evicted from the in-memory map on detection to prevent
+// unbounded accumulation under high ban-churn workloads.
 func (b *BanList) IsBanned(ip string) (BanEntry, bool) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	entry, ok := b.entries[ip]
 	if !ok {
+		b.mu.RUnlock()
 		return BanEntry{}, false
 	}
 	if !entry.Permanent && time.Now().After(entry.ExpiresAt) {
+		// Upgrade to write lock and evict the stale entry.
+		b.mu.RUnlock()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		// Re-check under write lock in case another goroutine refreshed or re-banned the IP
+		if cur, exists := b.entries[ip]; exists {
+			if !cur.Permanent && time.Now().After(cur.ExpiresAt) {
+				delete(b.entries, ip)
+				return BanEntry{}, false
+			}
+			return cur, true
+		}
 		return BanEntry{}, false
 	}
+	b.mu.RUnlock()
 	return entry, true
 }
 

@@ -356,7 +356,12 @@ func UpdatePluginEnablement(configPath string, pluginName string, enabled bool) 
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(configPath, buf.Bytes(), 0644); err != nil {
+	perm := os.FileMode(0644)
+	if fi, err := os.Stat(configPath); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	if err := os.WriteFile(configPath, buf.Bytes(), perm); err != nil {
 		return fmt.Errorf("writing updated config to %s: %w", configPath, err)
 	}
 
@@ -538,7 +543,12 @@ func AddDefaultPluginService(configPath string, pluginName string, defSvc *sdk.D
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(configPath, buf.Bytes(), 0644); err != nil {
+	perm := os.FileMode(0644)
+	if fi, err := os.Stat(configPath); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	if err := os.WriteFile(configPath, buf.Bytes(), perm); err != nil {
 		return false, "", fmt.Errorf("writing updated config to %s: %w", configPath, err)
 	}
 
@@ -615,8 +625,7 @@ func (s *SocketMode) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&str); err == nil {
 		m, err := strconv.ParseUint(str, 8, 32)
 		if err != nil {
-			*s = 0666
-			return nil
+			return fmt.Errorf("invalid socket_mode %q: expected an octal value such as '0660' or '0600'", str)
 		}
 		*s = SocketMode(m)
 		return nil

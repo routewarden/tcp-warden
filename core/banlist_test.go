@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,3 +150,245 @@ func TestBanList_LegacyJSONMigration(t *testing.T) {
 		t.Fatal("expected expired ban 192.168.1.102 to NOT be imported")
 	}
 }
+
+// ── Bug #1: IsBanned must evict expired entries from the in-memory map on read ──
+
+func TestBanList_IsBanned_EvictsExpiredEntryFromMemory(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// Ban with a duration that has already elapsed.
+	bl.Ban("192.0.2.1", "test", "ssh", 1*time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // ensure expiry
+
+	// IsBanned should return false for the expired entry …
+	_, ok := bl.IsBanned("192.0.2.1")
+	if ok {
+		t.Fatal("expected expired ban to return not-banned")
+	}
+
+	// … and the entry must have been removed from the internal map.
+	bl.mu.RLock()
+	_, stillPresent := bl.entries["192.0.2.1"]
+	bl.mu.RUnlock()
+
+	if stillPresent {
+		t.Error("Bug #1 regression: expired entry was not evicted from in-memory map by IsBanned")
+	}
+}
+
+// ── Bug #7: Permanent bans must store the far-future sentinel, not zero time ──
+
+func TestBanList_PermanentBan_StoresFarFutureSentinel(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	bl.Ban("10.0.0.1", "forever", "ssh", 0) // duration <= 0 → permanent
+
+	bl.mu.RLock()
+	entry, ok := bl.entries["10.0.0.1"]
+	bl.mu.RUnlock()
+
+	if !ok {
+		t.Fatal("permanent ban entry not found in map")
+	}
+	if !entry.Permanent {
+		t.Error("expected Permanent=true for a zero-duration ban")
+	}
+	if entry.ExpiresAt.IsZero() {
+		t.Error("Bug #7 regression: permanent ban stored zero ExpiresAt instead of far-future sentinel")
+	}
+	// Sentinel must be in the far future (at least year 9000).
+	if entry.ExpiresAt.Year() < 9000 {
+		t.Errorf("Bug #7 regression: permanent ban ExpiresAt year is %d, expected >= 9000", entry.ExpiresAt.Year())
+	}
+	// Must still be considered banned.
+	if _, banned := bl.IsBanned("10.0.0.1"); !banned {
+		t.Error("permanent ban with far-future sentinel must still be reported as banned")
+	}
+}
+
+// ── Round 3 Bug #1: TOCTOU race in IsBanned must not delete a concurrently added ban ──
+
+func TestBanList_IsBanned_ConcurrentRefreshUnderLockUpgrade(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// Seed with an expired ban
+	expiredTime := time.Now().Add(-10 * time.Minute)
+	bl.mu.Lock()
+	bl.entries["198.51.100.1"] = BanEntry{
+		IP:        "198.51.100.1",
+		Reason:    "old_expired",
+		ExpiresAt: expiredTime,
+		Permanent: false,
+	}
+	bl.mu.Unlock()
+
+	// Concurrently ban the IP with a fresh unexpired ban
+	freshExpiry := time.Now().Add(1 * time.Hour)
+	bl.Ban("198.51.100.1", "fresh_ban", "ssh", 1*time.Hour)
+
+	entry, banned := bl.IsBanned("198.51.100.1")
+	if !banned {
+		t.Fatal("Round 3 Bug #1 regression: fresh ban was reported as not banned")
+	}
+	if entry.Reason != "fresh_ban" {
+		t.Errorf("expected reason 'fresh_ban', got %q", entry.Reason)
+	}
+	if entry.ExpiresAt.Before(freshExpiry.Add(-10 * time.Second)) {
+		t.Errorf("expected fresh ExpiresAt, got %v", entry.ExpiresAt)
+	}
+
+	// Verify the ban is still in memory
+	bl.mu.RLock()
+	_, inMap := bl.entries["198.51.100.1"]
+	bl.mu.RUnlock()
+	if !inMap {
+		t.Error("Round 3 Bug #1 regression: newly refreshed ban was incorrectly evicted from memory")
+	}
+}
+
+// ── SQL Injection Safety on Unban ──
+
+func TestBanList_Unban_SQLInjectionSafety(t *testing.T) {
+	tmpDir := t.TempDir()
+	bl := NewBanList(tmpDir)
+	defer bl.Close()
+
+	// Legitimate ban
+	bl.Ban("10.0.0.1", "brute_force", "ssh", 1*time.Hour)
+	bl.Ban("10.0.0.2", "malicious_probe", "redis", 1*time.Hour)
+
+	if bl.Count() != 2 {
+		t.Fatalf("expected 2 initial bans, got %d", bl.Count())
+	}
+
+	// Attempt SQL injection payloads via Unban
+	injectionPayloads := []string{
+		"' OR '1'='1",
+		"10.0.0.1'; DROP TABLE ban_entries; --",
+		"10.0.0.1' OR '1'='1'; --",
+		"\" OR \"\"=\"",
+	}
+
+	for _, payload := range injectionPayloads {
+		res := bl.Unban(payload)
+		if res {
+			t.Errorf("expected unban with payload %q to return false, got true", payload)
+		}
+	}
+
+	// Verify existing bans were not affected or wiped by injection attempts
+	if bl.Count() != 2 {
+		t.Fatalf("expected 2 bans to remain after injection attempts, got %d", bl.Count())
+	}
+	if _, ok := bl.IsBanned("10.0.0.1"); !ok {
+		t.Error("expected 10.0.0.1 to still be banned")
+	}
+	if _, ok := bl.IsBanned("10.0.0.2"); !ok {
+		t.Error("expected 10.0.0.2 to still be banned")
+	}
+}
+
+// ── Unban IP that only exists in SQLite DB ──
+
+func TestBanList_Unban_PresentOnlyInDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	bl := NewBanList(tmpDir)
+	defer bl.Close()
+
+	bl.Ban("198.51.100.20", "direct_db_test", "ssh", 1*time.Hour)
+
+	// Manually delete from in-memory map to simulate out-of-sync or DB-persisted state
+	bl.mu.Lock()
+	delete(bl.entries, "198.51.100.20")
+	bl.mu.Unlock()
+
+	// Unban should detect it in DB (RowsAffected > 0) and return true
+	unbanned := bl.Unban("198.51.100.20")
+	if !unbanned {
+		t.Error("expected Unban to return true for entry present only in SQLite DB")
+	}
+
+	// A second unban should return false
+	if bl.Unban("198.51.100.20") {
+		t.Error("expected second Unban to return false")
+	}
+}
+
+// ── IPv6 Handling in Banlist ──
+
+func TestBanList_IPv6Handling(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	ipv6Addrs := []string{
+		"::1",
+		"2001:db8::1",
+		"fe80::1",
+		"2607:f8b0:4005:805::200e",
+	}
+
+	for _, ip := range ipv6Addrs {
+		bl.Ban(ip, "ipv6_test", "ssh", 1*time.Hour)
+		entry, banned := bl.IsBanned(ip)
+		if !banned {
+			t.Errorf("expected IPv6 address %q to be banned", ip)
+		}
+		if entry.IP != ip {
+			t.Errorf("expected IP %q in entry, got %q", ip, entry.IP)
+		}
+	}
+
+	if bl.Count() != len(ipv6Addrs) {
+		t.Fatalf("expected count %d, got %d", len(ipv6Addrs), bl.Count())
+	}
+
+	for _, ip := range ipv6Addrs {
+		if !bl.Unban(ip) {
+			t.Errorf("expected Unban for %q to succeed", ip)
+		}
+	}
+
+	if bl.Count() != 0 {
+		t.Fatalf("expected 0 bans after unbanning all IPv6, got %d", bl.Count())
+	}
+}
+
+// ── Concurrent Ban / Unban / IsBanned Stress Test ──
+
+func TestBanList_ConcurrentStress(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	done := make(chan struct{})
+	numWorkers := 8
+	iterations := 200
+
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			for j := 0; j < iterations; j++ {
+				ip := fmt.Sprintf("192.168.%d.%d", workerID, j%10)
+				bl.Ban(ip, "stress_test", "ssh", 100*time.Millisecond)
+				_, _ = bl.IsBanned(ip)
+				_ = bl.Count()
+				_ = bl.All()
+				if j%2 == 0 {
+					bl.Unban(ip)
+				}
+			}
+			done <- struct{}{}
+		}(i)
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent banlist stress test timed out")
+		}
+	}
+}
+
+

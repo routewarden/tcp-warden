@@ -1230,4 +1230,167 @@ func TestAPI_BanUnban_IPv6Zone(t *testing.T) {
 	}
 }
 
+func TestAPI_BanlistListingAndUnban(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:0",
+		},
+		Global: config.GlobalConfig{
+			BanDuration: config.Duration(1 * time.Hour),
+		},
+	}
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	// Add 2 bans
+	bl.Ban("198.51.100.1", "manual_test_1", "test-service", 1*time.Hour)
+	bl.Ban("198.51.100.2", "manual_test_2", "test-service", 1*time.Hour)
+
+	// List bans via /api/banlist
+	req := httptest.NewRequest("GET", "/api/banlist", nil)
+	w := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/banlist, got %d", w.Code)
+	}
+
+	var bans []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &bans); err != nil {
+		t.Fatalf("failed to decode banlist JSON: %v, raw: %s", err, w.Body.String())
+	}
+	if len(bans) != 2 {
+		t.Errorf("expected 2 bans in banlist, got %d", len(bans))
+	}
+
+	// Unban one IP
+	unbanReq := httptest.NewRequest("POST", "/api/unban", bytes.NewBufferString(`{"ip":"198.51.100.1"}`))
+	unbanReq.Header.Set("Content-Type", "application/json")
+	unbanW := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(unbanW, unbanReq)
+
+	if unbanW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from unban, got %d", unbanW.Code)
+	}
+
+	// List bans again; should only have 1 left
+	req2 := httptest.NewRequest("GET", "/api/banlist", nil)
+	w2 := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(w2, req2)
+
+	var bans2 []map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &bans2); err != nil {
+		t.Fatalf("failed to decode banlist JSON: %v", err)
+	}
+	if len(bans2) != 1 {
+		t.Errorf("expected 1 ban remaining, got %d", len(bans2))
+	}
+	if bans2[0]["ip"] != "198.51.100.2" {
+		t.Errorf("expected 198.51.100.2 remaining, got %v", bans2[0]["ip"])
+	}
+}
+
+func TestAPI_ServicesListing(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:0",
+		},
+		Services: map[string]config.ServiceConfig{
+			"redis-prod": {
+				Listen:   "0.0.0.0:6379",
+				Upstream: "127.0.0.1:6379",
+				Protocol: "redis",
+			},
+			"mysql-prod": {
+				Listen:   "0.0.0.0:3306",
+				Upstream: "127.0.0.1:3306",
+				Protocol: "mysql",
+			},
+		},
+	}
+	api := NewAPIServer(cfg, NewBanList(""), NewStatsRegistry(), NewEventBus(), nil)
+
+	req := httptest.NewRequest("GET", "/api/services", nil)
+	w := httptest.NewRecorder()
+	api.srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/services, got %d", w.Code)
+	}
+
+	var services []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &services); err != nil {
+		t.Fatalf("failed decoding services JSON: %v", err)
+	}
+	if len(services) != 2 {
+		t.Errorf("expected 2 services, got %d", len(services))
+	}
+}
+
+func TestPipeline_IPFilter_IPv6AndCIDR(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		Global: config.GlobalConfig{
+			IPFilter: config.IPFilterConfig{
+				Allow: []string{"2001:db8::/32", "192.168.1.0/24"},
+			},
+		},
+		Services: map[string]config.ServiceConfig{
+			"echo": {
+				Name:     "echo",
+				Listen:   "127.0.0.1:0",
+				Upstream: "127.0.0.1:0",
+			},
+		},
+	}
+	bl := NewBanList("")
+	ft := NewFailureTracker()
+	rl := NewRateLimiter()
+	bus := NewEventBus()
+	stats := NewStatsRegistry()
+
+	pipeline := NewPipeline(cfg, bl, ft, rl, bus, stats, nil, nil)
+	pIP := parseClientIP("[2001:db8::cafe]:12345")
+	if pIP != "2001:db8::cafe" {
+		t.Errorf("expected parsed client IP 2001:db8::cafe, got %s", pIP)
+	}
+
+	svc := cfg.Services["echo"]
+
+	// In global allowlist: should NOT be denied
+	if pipeline.isIPDenied("2001:db8::cafe", &svc) {
+		t.Errorf("expected 2001:db8::cafe to be allowed via 2001:db8::/32 CIDR")
+	}
+
+	// Outside global allowlist: should be denied
+	if !pipeline.isIPDenied("2001:db9::1", &svc) {
+		t.Errorf("expected 2001:db9::1 to be denied")
+	}
+
+	// Service-level deny takes precedence
+	svcWithDeny := svc
+	svcWithDeny.IPFilter.Deny = []string{"2001:db8::cafe"}
+	if !pipeline.isIPDenied("2001:db8::cafe", &svcWithDeny) {
+		t.Errorf("expected 2001:db8::cafe to be denied by service-level deny")
+	}
+
+	// Test matchIP edge cases
+	if !matchIP(net.ParseIP("192.168.1.50"), "192.168.1.0/24") {
+		t.Errorf("expected matchIP to return true for 192.168.1.50 in 192.168.1.0/24")
+	}
+	if matchIP(net.ParseIP("192.168.2.50"), "192.168.1.0/24") {
+		t.Errorf("expected matchIP to return false for 192.168.2.50 in 192.168.1.0/24")
+	}
+	if !matchIP(net.ParseIP("10.0.0.1"), "10.0.0.1") {
+		t.Errorf("expected exact IP match for 10.0.0.1")
+	}
+}
+
+
 

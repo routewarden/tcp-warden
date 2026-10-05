@@ -267,3 +267,71 @@ func TestProxy_HalfCloseNoCloseWriter(t *testing.T) {
 		t.Fatal("proxy timed out waiting for completion")
 	}
 }
+
+func TestBufferedConn_EmptyReader(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	bConn := &BufferedConn{
+		Reader: bytes.NewReader(nil),
+		Conn:   c1,
+	}
+
+	go func() {
+		_, _ = c2.Write([]byte("direct-from-conn"))
+	}()
+
+	buf := make([]byte, 16)
+	n, err := bConn.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading through empty reader: %v", err)
+	}
+	if string(buf[:n]) != "direct-from-conn" {
+		t.Errorf("expected 'direct-from-conn', got %q", string(buf[:n]))
+	}
+	if bConn.Reader != nil {
+		t.Errorf("expected Reader to be nil after EOF exhaustion")
+	}
+}
+
+func TestProxy_LargeTransfer(t *testing.T) {
+	clientConn, proxyClient := net.Pipe()
+	proxyUpstream, upstreamConn := net.Pipe()
+
+	defer clientConn.Close()
+	defer proxyClient.Close()
+	defer proxyUpstream.Close()
+	defer upstreamConn.Close()
+
+	done := make(chan ProxyResult, 1)
+	go func() {
+		done <- Proxy(proxyClient, proxyUpstream)
+	}()
+
+	chunkSize := 1024
+	totalChunks := 10
+	payload := bytes.Repeat([]byte("A"), chunkSize*totalChunks)
+
+	go func() {
+		for i := 0; i < totalChunks; i++ {
+			_, _ = clientConn.Write(payload[i*chunkSize : (i+1)*chunkSize])
+		}
+		_ = clientConn.Close()
+	}()
+
+	received := make([]byte, len(payload))
+	n, err := io.ReadFull(upstreamConn, received)
+	if err != nil {
+		t.Fatalf("failed reading large transfer: %v", err)
+	}
+	if n != len(payload) {
+		t.Errorf("expected %d bytes, got %d", len(payload), n)
+	}
+	_ = upstreamConn.Close()
+
+	res := <-done
+	if res.BytesIn != int64(len(payload)) {
+		t.Errorf("expected BytesIn=%d, got %d", len(payload), res.BytesIn)
+	}
+}

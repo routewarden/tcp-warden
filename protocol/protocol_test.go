@@ -87,6 +87,78 @@ func TestBufferedConn_Read(t *testing.T) {
 	}
 }
 
+func TestBufferedConn_ReaderFallback(t *testing.T) {
+	// Test 1: bytes.NewReader(peeked) transitions to reading from Conn
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	peeked := []byte("prefix-data:")
+	buffered := &BufferedConn{
+		Reader: bytes.NewReader(peeked),
+		Conn:   c1,
+	}
+
+	go func() {
+		_, _ = c2.Write([]byte("conn-data"))
+	}()
+
+	buf := make([]byte, len(peeked)+len("conn-data"))
+	_, err := io.ReadFull(buffered, buf)
+	if err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if string(buf) != "prefix-data:conn-data" {
+		t.Errorf("expected 'prefix-data:conn-data', got %q", string(buf))
+	}
+
+	// Test 2: bytes.NewReader(nil) immediately reads from Conn
+	c3, c4 := net.Pipe()
+	defer c3.Close()
+	defer c4.Close()
+
+	emptyBuffered := &BufferedConn{
+		Reader: bytes.NewReader(nil),
+		Conn:   c3,
+	}
+
+	go func() {
+		_, _ = c4.Write([]byte("direct-conn-data"))
+	}()
+
+	buf2 := make([]byte, len("direct-conn-data"))
+	_, err = io.ReadFull(emptyBuffered, buf2)
+	if err != nil {
+		t.Fatalf("unexpected read error for empty Reader: %v", err)
+	}
+	if string(buf2) != "direct-conn-data" {
+		t.Errorf("expected 'direct-conn-data', got %q", string(buf2))
+	}
+
+	// Test 3: Reader is nil immediately reads from Conn
+	c5, c6 := net.Pipe()
+	defer c5.Close()
+	defer c6.Close()
+
+	nilBuffered := &BufferedConn{
+		Reader: nil,
+		Conn:   c5,
+	}
+
+	go func() {
+		_, _ = c6.Write([]byte("nil-reader-data"))
+	}()
+
+	buf3 := make([]byte, len("nil-reader-data"))
+	_, err = io.ReadFull(nilBuffered, buf3)
+	if err != nil {
+		t.Fatalf("unexpected read error for nil Reader: %v", err)
+	}
+	if string(buf3) != "nil-reader-data" {
+		t.Errorf("expected 'nil-reader-data', got %q", string(buf3))
+	}
+}
+
 func TestBufferedConn_CloseWrite(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c1.Close()

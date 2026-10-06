@@ -1392,5 +1392,30 @@ func TestPipeline_IPFilter_IPv6AndCIDR(t *testing.T) {
 	}
 }
 
+func TestCore_IPFilter_BoundaryCases(t *testing.T) {
+	// 1. Bracketed IPv6 without port
+	if got := parseClientIP("[::1]"); got != "::1" {
+		t.Errorf("expected ::1, got %s", got)
+	}
+	if got := parseClientIP("[2001:db8::1]"); got != "2001:db8::1" {
+		t.Errorf("expected 2001:db8::1, got %s", got)
+	}
+	// 2. IPv6 with zone identifier
+	if got := parseClientIP("fe80::1%eth0"); got != "fe80::1" {
+		t.Errorf("expected fe80::1, got %s", got)
+	}
+
+	// 3. matchIP with bracketed pattern
+	if !matchIP(net.ParseIP("::1"), "[::1]") {
+		t.Errorf("expected matchIP to match bracketed IPv6 pattern [::1]")
+	}
+
+	// 4. matchIP with IPv4-mapped IPv6 against IPv4 CIDR
+	mappedIP := net.ParseIP("::ffff:192.168.1.100")
+	if !matchIP(mappedIP, "192.168.1.0/24") {
+		t.Errorf("expected IPv4-mapped IPv6 ::ffff:192.168.1.100 to match 192.168.1.0/24")
+	}
+}
+
 
 

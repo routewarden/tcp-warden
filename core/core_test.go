@@ -1417,5 +1417,68 @@ func TestCore_IPFilter_BoundaryCases(t *testing.T) {
 	}
 }
 
+func TestAPI_BanAndUnban_SecurityBoundaries(t *testing.T) {
+	cfg := &config.Config{
+		Version: "1.0",
+		API: config.APIConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:0",
+		},
+		Global: config.GlobalConfig{
+			BanDuration: config.Duration(1 * time.Hour),
+		},
+	}
+	bl := NewBanList("")
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+	api := NewAPIServer(cfg, bl, stats, bus, nil)
+
+	// 1. Bracketed IPv6 ban via API
+	body := strings.NewReader(`{"ip":"[2001:db8::cafe]","reason":"boundary_test"}`)
+	req := httptest.NewRequest("POST", "/api/ban", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for bracketed IPv6 ban, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, isBanned := bl.IsBanned("2001:db8::cafe"); !isBanned {
+		t.Error("expected 2001:db8::cafe to be banned in banlist")
+	}
+
+	// 2. Negative duration rejection
+	negBody := strings.NewReader(`{"ip":"1.2.3.4","duration":"-10m"}`)
+	req = httptest.NewRequest("POST", "/api/ban", negBody)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for negative duration, got %d", w.Code)
+	}
+
+	// 3. Oversized body rejection (>64KB)
+	hugeBody := strings.NewReader(`{"ip":"1.2.3.4","reason":"` + strings.Repeat("A", 70000) + `"}`)
+	req = httptest.NewRequest("POST", "/api/ban", hugeBody)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for oversized body, got %d", w.Code)
+	}
+
+	// 4. Bracketed unban
+	unbanBody := strings.NewReader(`{"ip":"[2001:db8::cafe]"}`)
+	req = httptest.NewRequest("POST", "/api/unban", unbanBody)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	api.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for bracketed unban, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, isBanned := bl.IsBanned("2001:db8::cafe"); isBanned {
+		t.Error("expected 2001:db8::cafe to be unbanned")
+	}
+}
+
 
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,9 +187,30 @@ func (b *BanList) load() {
 // were accidentally omitted from a future query.
 var permanentBanExpiry = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
+// canonicalizeIP strips surrounding whitespace, brackets, ports, zone identifiers,
+// and canonicalizes IPv4-mapped IPv6 addresses so that ban enforcement cannot be bypassed.
+func canonicalizeIP(ip string) string {
+	trimmed := strings.TrimSpace(ip)
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = host
+	}
+	trimmed = strings.Trim(trimmed, "[]")
+	if idx := strings.IndexByte(trimmed, '%'); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+	if parsed := net.ParseIP(trimmed); parsed != nil {
+		if v4 := parsed.To4(); v4 != nil {
+			return v4.String()
+		}
+		return parsed.String()
+	}
+	return trimmed
+}
+
 // Ban records an IP address as banned for the given duration.
 // Pass duration <= 0 for a permanent ban.
 func (b *BanList) Ban(ip, reason, service string, duration time.Duration) {
+	ip = canonicalizeIP(ip)
 	now := time.Now().UTC()
 	perm := duration <= 0
 	var expires time.Time
@@ -222,6 +245,7 @@ func (b *BanList) Ban(ip, reason, service string, duration time.Duration) {
 
 // Unban removes an IP from the banlist. Returns true if the IP was present.
 func (b *BanList) Unban(ip string) bool {
+	ip = canonicalizeIP(ip)
 	b.mu.Lock()
 	_, exists := b.entries[ip]
 	if exists {
@@ -244,6 +268,7 @@ func (b *BanList) Unban(ip string) bool {
 // Expired entries are evicted from the in-memory map on detection to prevent
 // unbounded accumulation under high ban-churn workloads.
 func (b *BanList) IsBanned(ip string) (BanEntry, bool) {
+	ip = canonicalizeIP(ip)
 	b.mu.RLock()
 	entry, ok := b.entries[ip]
 	if !ok {

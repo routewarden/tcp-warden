@@ -624,3 +624,75 @@ func TestEncodeConfig(t *testing.T) {
 	}
 }
 
+func TestPluginInstaller_SecurityBoundaries(t *testing.T) {
+	t.Run("CreatePlugin_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-create-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		maliciousNames := []string{
+			"../../escaped",
+			"../root",
+			"foo/bar",
+			"foo\\bar",
+			"name:with:colons",
+			"plugin;echo",
+			"plugin spaces",
+			"",
+		}
+
+		for _, badName := range maliciousNames {
+			_, err := plugins.CreatePlugin(plugins.CreatePluginOptions{
+				Name:       badName,
+				ProjectDir: tmpDir,
+			})
+			if err == nil {
+				t.Errorf("expected CreatePlugin to reject malicious name %q, got nil error", badName)
+			}
+		}
+	})
+
+	t.Run("UninstallPlugin_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-uninstall-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		opts := plugins.InstallOptions{
+			ProjectDir: tmpDir,
+			PluginsDir: filepath.Join(tmpDir, "plugins"),
+			NoBuild:    true,
+		}
+
+		badNames := []string{"../../etc", "../plugins", "a/b", "c\\d"}
+		for _, badName := range badNames {
+			if err := plugins.UninstallPlugin(badName, opts); err == nil {
+				t.Errorf("expected UninstallPlugin to reject %q, got nil error", badName)
+			}
+		}
+	})
+
+	t.Run("SyncPluginFromSource_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-sync-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		opts := plugins.InstallOptions{
+			ProjectDir: tmpDir,
+			CacheDir:   filepath.Join(tmpDir, "cache"),
+			NoBuild:    true,
+		}
+
+		_, err = plugins.SyncPluginFromSource("../../evil", "https://github.com/routewarden/plugins/test", opts)
+		if err == nil {
+			t.Errorf("expected SyncPluginFromSource to reject path traversal in name")
+		}
+	})
+}
+
+

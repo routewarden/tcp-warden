@@ -431,6 +431,11 @@ func SyncPluginFromSource(name string, source string, opts InstallOptions) (*Ins
 	opts.PluginsDir = ResolvePluginsDir(opts.PluginsDir, opts.ProjectDir)
 
 	name = strings.ToLower(strings.TrimSpace(name))
+	if name != "" {
+		if err := validatePluginName(name); err != nil {
+			return nil, err
+		}
+	}
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return nil, errors.New("plugin source cannot be empty")
@@ -600,7 +605,15 @@ func stagePluginSource(source string) (string, bool, error) {
 
 		sourceDir := cloneDir
 		if subPath != "" {
-			sourceDir = filepath.Join(cloneDir, subPath)
+			cleanSubPath := filepath.Clean(subPath)
+			if strings.HasPrefix(cleanSubPath, "..") || filepath.IsAbs(cleanSubPath) {
+				return "", false, fmt.Errorf("plugin subpath %q attempts path traversal outside repository", subPath)
+			}
+			sourceDir = filepath.Join(cloneDir, cleanSubPath)
+			rel, err := filepath.Rel(cloneDir, sourceDir)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				return "", false, fmt.Errorf("plugin subpath %q escapes repository root", subPath)
+			}
 			if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
 				return "", false, fmt.Errorf("plugin subpath %q not found in repository %s", subPath, repoURL)
 			}
@@ -808,8 +821,8 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 	}
 
 	nameKey := strings.ToLower(strings.TrimSpace(name))
-	if nameKey == "" || nameKey == "." || nameKey == "/" || strings.Contains(nameKey, "..") {
-		return errors.New("invalid or empty plugin name")
+	if err := validatePluginName(nameKey); err != nil {
+		return fmt.Errorf("invalid plugin name: %w", err)
 	}
 
 	allGoPath := filepath.Join(opts.PluginsDir, "all", "all.go")
@@ -1013,6 +1026,17 @@ func copyDir(src, dst string) error {
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(srcPath)
+			if err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(src, target)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+		}
 
 		if entry.IsDir() {
 			if entry.Name() == ".git" {
@@ -1300,8 +1324,8 @@ type CreatePluginResult struct {
 // CreatePlugin generates a complete, working modular plugin scaffold.
 func CreatePlugin(opts CreatePluginOptions) (*CreatePluginResult, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.Name))
-	if name == "" {
-		return nil, errors.New("plugin name cannot be empty")
+	if err := validatePluginName(name); err != nil {
+		return nil, fmt.Errorf("invalid plugin name: %w", err)
 	}
 
 	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
@@ -1541,3 +1565,20 @@ func TestPlugin_SelfTest(t *testing.T) {
 		ManifestPath:   manifestPath,
 	}, nil
 }
+
+func validatePluginName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("plugin name cannot be empty")
+	}
+	if strings.ContainsAny(name, "/\\:") || strings.Contains(name, "..") {
+		return fmt.Errorf("plugin name %q contains path separators or traversal characters", name)
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return fmt.Errorf("plugin name %q contains invalid characters (allowed: alphanumeric, underscore, hyphen)", name)
+		}
+	}
+	return nil
+}
+

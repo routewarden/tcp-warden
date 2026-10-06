@@ -430,3 +430,37 @@ func TestAuthFailure_LogLevel(t *testing.T) {
 		t.Fatal("timed out waiting for security event")
 	}
 }
+
+func TestUDPEngine_BannedIP_Dropped(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+	bl.Ban("198.51.100.77", "manual_test", "udp-test", time.Hour)
+
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+	defer bus.Close()
+
+	d := &Daemon{
+		banlist:  bl,
+		stats:    stats,
+		bus:      bus,
+		pipeline: NewPipeline(&config.Config{}, bl, NewFailureTracker(), NewRateLimiter(), bus, stats, nil, nil),
+	}
+
+	st := stats.GetOrCreate("udp-test")
+	initialBlocked := st.Snapshot().BlockedConnections
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("198.51.100.77"), Port: 12345}
+	table := NewUDPSessionTable(5 * time.Second)
+	defer table.Close()
+
+	d.handleUDPPacket(context.Background(), nil, clientAddr, []byte("ping"), config.ServiceConfig{Name: "udp-test"}, table)
+
+	if st.Snapshot().BlockedConnections <= initialBlocked {
+		t.Errorf("expected blocked count to increase for banned UDP client")
+	}
+	if table.Len() != 0 {
+		t.Errorf("expected no session created for banned UDP packet, got %d", table.Len())
+	}
+}
+

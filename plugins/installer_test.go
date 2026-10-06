@@ -508,3 +508,191 @@ func TestCreatePlugin_UsesCloseWriteInTemplate(t *testing.T) {
 	}
 }
 
+func TestInstallPlugin_WithExternalDependenciesAndNestedGoMod(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-ext-dep-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockPluginDir := filepath.Join(tmpDir, "source_ext_plugin")
+	if err := os.MkdirAll(mockPluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestContent := `name: ext_plugin
+version: 1.0.0
+description: A plugin with external dependencies and its own go.mod
+protocols:
+  - ext_proto
+`
+	if err := os.WriteFile(filepath.Join(mockPluginDir, "plugin.yaml"), []byte(manifestContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nestedMod := `module example.com/ext_plugin
+
+go 1.22
+
+require gopkg.in/yaml.v3 v3.0.1
+`
+	if err := os.WriteFile(filepath.Join(mockPluginDir, "go.mod"), []byte(nestedMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pluginGo := `package ext_plugin
+
+import (
+	"gopkg.in/yaml.v3"
+)
+
+func EncodeConfig(data any) ([]byte, error) {
+	return yaml.Marshal(data)
+}
+`
+	if err := os.WriteFile(filepath.Join(mockPluginDir, "ext.go"), []byte(pluginGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pluginTestGo := `package ext_plugin
+
+import "testing"
+
+func TestEncodeConfig(t *testing.T) {
+	out, err := EncodeConfig(map[string]string{"key": "val"})
+	if err != nil || len(out) == 0 {
+		t.Fatalf("EncodeConfig failed: %v", err)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(mockPluginDir, "ext_test.go"), []byte(pluginTestGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPluginsDir := filepath.Join(tmpDir, "plugins")
+	_ = os.MkdirAll(filepath.Join(targetPluginsDir, "all"), 0755)
+	_ = os.WriteFile(filepath.Join(targetPluginsDir, "all", "all.go"), []byte("package all\n\nimport (\n)\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module github.com/routewarden/tcp-warden\n\ngo 1.22\n"), 0644)
+
+	opts := plugins.InstallOptions{
+		PluginsDir: targetPluginsDir,
+		ProjectDir: tmpDir,
+		NoBuild:    true,
+	}
+
+	res, err := plugins.InstallPlugin(mockPluginDir, opts)
+	if err != nil {
+		t.Fatalf("InstallPlugin with external dependency failed: %v", err)
+	}
+
+	if res.Name != "ext_plugin" {
+		t.Errorf("expected ext_plugin, got %s", res.Name)
+	}
+	if !res.TestPassed {
+		t.Fatalf("expected tests to pass, output: %s", res.TestOutput)
+	}
+	if res.Status != plugins.StatusActive {
+		t.Errorf("expected status ACTIVE, got %v", res.Status)
+	}
+
+	// 1. Verify nested go.mod was stripped in installed location
+	installedMod := filepath.Join(targetPluginsDir, "ext_plugin", "go.mod")
+	if _, err := os.Stat(installedMod); !os.IsNotExist(err) {
+		t.Errorf("expected nested go.mod to be removed from %s", installedMod)
+	}
+
+	// 2. Verify project go.mod has yaml.v3 required
+	hostModBytes, err := os.ReadFile(filepath.Join(tmpDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("failed reading host go.mod: %v", err)
+	}
+	if !strings.Contains(string(hostModBytes), "gopkg.in/yaml.v3") {
+		t.Errorf("expected host go.mod to contain gopkg.in/yaml.v3 requirement, got:\n%s", string(hostModBytes))
+	}
+
+	// 3. Uninstall plugin and verify dependency is tidied up
+	if err := plugins.UninstallPlugin("ext_plugin", opts); err != nil {
+		t.Fatalf("UninstallPlugin failed: %v", err)
+	}
+
+	hostModAfter, err := os.ReadFile(filepath.Join(tmpDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("failed reading host go.mod after uninstall: %v", err)
+	}
+	if strings.Contains(string(hostModAfter), "gopkg.in/yaml.v3") {
+		t.Errorf("expected gopkg.in/yaml.v3 to be tidied from host go.mod after uninstall, got:\n%s", string(hostModAfter))
+	}
+}
+
+func TestPluginInstaller_SecurityBoundaries(t *testing.T) {
+	t.Run("CreatePlugin_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-create-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		maliciousNames := []string{
+			"../../escaped",
+			"../root",
+			"foo/bar",
+			"foo\\bar",
+			"name:with:colons",
+			"plugin;echo",
+			"plugin spaces",
+			"",
+		}
+
+		for _, badName := range maliciousNames {
+			_, err := plugins.CreatePlugin(plugins.CreatePluginOptions{
+				Name:       badName,
+				ProjectDir: tmpDir,
+			})
+			if err == nil {
+				t.Errorf("expected CreatePlugin to reject malicious name %q, got nil error", badName)
+			}
+		}
+	})
+
+	t.Run("UninstallPlugin_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-uninstall-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		opts := plugins.InstallOptions{
+			ProjectDir: tmpDir,
+			PluginsDir: filepath.Join(tmpDir, "plugins"),
+			NoBuild:    true,
+		}
+
+		badNames := []string{"../../etc", "../plugins", "a/b", "c\\d"}
+		for _, badName := range badNames {
+			if err := plugins.UninstallPlugin(badName, opts); err == nil {
+				t.Errorf("expected UninstallPlugin to reject %q, got nil error", badName)
+			}
+		}
+	})
+
+	t.Run("SyncPluginFromSource_RejectsPathTraversalNames", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "test-sync-sec-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		opts := plugins.InstallOptions{
+			ProjectDir: tmpDir,
+			CacheDir:   filepath.Join(tmpDir, "cache"),
+			NoBuild:    true,
+		}
+
+		_, err = plugins.SyncPluginFromSource("../../evil", "https://github.com/routewarden/plugins/test", opts)
+		if err == nil {
+			t.Errorf("expected SyncPluginFromSource to reject path traversal in name")
+		}
+	})
+}
+
+

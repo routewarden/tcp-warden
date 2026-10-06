@@ -59,6 +59,21 @@ func (d *Daemon) serveUDPService(ctx context.Context, conn *net.UDPConn, svc con
 			}
 		}
 
+		// Drop empty packets
+		if n == 0 {
+			continue
+		}
+
+		// Fast path: drop actively banned IPs synchronously before allocating closure/goroutine
+		if d.banlist != nil {
+			if _, isBanned := d.banlist.IsBanned(clientAddr.IP.String()); isBanned {
+				if d.stats != nil {
+					d.stats.GetOrCreate(svc.Name).AddBlocked()
+				}
+				continue
+			}
+		}
+
 		// Copy datagram before handing off — buf is reused on next iteration.
 		payload := make([]byte, n)
 		copy(payload, buf[:n])

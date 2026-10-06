@@ -431,6 +431,7 @@ func parseClientIP(remoteAddr string) string {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		remoteAddr = host
 	}
+	remoteAddr = strings.Trim(remoteAddr, "[]")
 	if idx := strings.IndexByte(remoteAddr, '%'); idx != -1 {
 		remoteAddr = remoteAddr[:idx]
 	}
@@ -439,13 +440,19 @@ func parseClientIP(remoteAddr string) string {
 
 func matchIP(ip net.IP, pattern string) bool {
 	pattern = strings.TrimSpace(pattern)
+	pattern = strings.Trim(pattern, "[]")
 	if idx := strings.IndexByte(pattern, '%'); idx != -1 {
 		pattern = pattern[:idx]
 	}
 	if strings.Contains(pattern, "/") {
 		_, ipNet, err := net.ParseCIDR(pattern)
 		if err == nil {
-			return ipNet.Contains(ip)
+			if ipNet.Contains(ip) {
+				return true
+			}
+			if v4 := ip.To4(); v4 != nil && ipNet.Contains(v4) {
+				return true
+			}
 		}
 		return false
 	}

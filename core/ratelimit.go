@@ -4,43 +4,24 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 const (
-	rateLimiterBucketTTL   = 10 * time.Minute
+	rateLimiterBucketTTL    = 10 * time.Minute
 	failureTrackerWindowTTL = 30 * time.Minute
 )
 
-type tokenBucket struct {
-	tokens     float64
-	capacity   float64
-	refillRate float64 // tokens per second
-	lastRefill time.Time
+type ipRateLimiter struct {
+	limiter    *rate.Limiter
 	lastAccess time.Time
 }
 
-func (b *tokenBucket) allow() bool {
-	now := time.Now()
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	b.lastRefill = now
-	b.lastAccess = now
-
-	b.tokens += elapsed * b.refillRate
-	if b.tokens > b.capacity {
-		b.tokens = b.capacity
-	}
-
-	if b.tokens >= 1.0 {
-		b.tokens -= 1.0
-		return true
-	}
-	return false
-}
-
-// RateLimiter manages per-service and per-IP token buckets.
+// RateLimiter manages per-service and per-IP token buckets using standard rate.Limiter.
 type RateLimiter struct {
 	mu      sync.Mutex
-	buckets map[string]*tokenBucket // key = service:ip
+	buckets map[string]*ipRateLimiter // key = service:ip
 	cancel  context.CancelFunc
 }
 
@@ -48,7 +29,7 @@ type RateLimiter struct {
 func NewRateLimiter() *RateLimiter {
 	ctx, cancel := context.WithCancel(context.Background())
 	rl := &RateLimiter{
-		buckets: make(map[string]*tokenBucket),
+		buckets: make(map[string]*ipRateLimiter),
 		cancel:  cancel,
 	}
 	go rl.cleanupLoop(ctx)
@@ -61,34 +42,38 @@ func (r *RateLimiter) Allow(service, ip string, connsPerMin, burst int) bool {
 		return true
 	}
 
-	capacity := float64(burst)
+	capacity := burst
 	if capacity <= 0 {
-		capacity = float64(connsPerMin) / 6.0 // default burst
+		capacity = connsPerMin / 6 // default burst
 		if capacity < 2 {
 			capacity = 2
 		}
 	}
-	refillRate := float64(connsPerMin) / 60.0
+	refillRate := rate.Limit(float64(connsPerMin) / 60.0)
 
 	key := service + ":" + ip
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	b, exists := r.buckets[key]
+	entry, exists := r.buckets[key]
 	if !exists {
-		b = &tokenBucket{
-			tokens:     capacity - 1.0,
-			capacity:   capacity,
-			refillRate: refillRate,
-			lastRefill: time.Now(),
+		entry = &ipRateLimiter{
+			limiter:    rate.NewLimiter(refillRate, capacity),
 			lastAccess: time.Now(),
 		}
-		r.buckets[key] = b
-		return true
+		r.buckets[key] = entry
+	} else {
+		entry.lastAccess = time.Now()
+		if entry.limiter.Limit() != refillRate {
+			entry.limiter.SetLimit(refillRate)
+		}
+		if entry.limiter.Burst() != capacity {
+			entry.limiter.SetBurst(capacity)
+		}
 	}
 
-	return b.allow()
+	return entry.limiter.Allow()
 }
 
 // Stop shuts down the background cleanup goroutine.

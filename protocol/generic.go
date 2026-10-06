@@ -71,7 +71,22 @@ type BufferedConn struct {
 }
 
 func (b *BufferedConn) Read(p []byte) (int, error) {
-	return b.Reader.Read(p)
+	if b.Reader != nil {
+		n, err := b.Reader.Read(p)
+		if n > 0 {
+			if err == io.EOF {
+				b.Reader = nil
+				return n, nil
+			}
+			return n, err
+		}
+		if err == io.EOF {
+			b.Reader = nil
+		} else if err != nil {
+			return 0, err
+		}
+	}
+	return b.Conn.Read(p)
 }
 
 // CloseWrite forwards half-close to the underlying Conn if supported.

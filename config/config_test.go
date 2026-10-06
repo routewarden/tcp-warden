@@ -791,3 +791,20 @@ func TestSocketMode_UnmarshalYAML_Invalid(t *testing.T) {
 	}
 }
 
+func TestIsValidIPOrCIDR_ZoneIndex(t *testing.T) {
+	valid := []string{
+		"192.168.1.1",
+		"10.0.0.0/8",
+		"2001:db8::1",
+		"fe80::1%eth0",
+		"fe80::1%1",
+		"2001:db8::/32",
+	}
+	for _, s := range valid {
+		if !isValidIPOrCIDR(s) {
+			t.Errorf("expected %q to be valid IP or CIDR", s)
+		}
+	}
+}
+
+

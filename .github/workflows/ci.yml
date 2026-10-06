@@ -13,16 +13,16 @@ concurrency:
 
 jobs:
   test-go:
-    name: Go 1.25.1 Test & Build
+    name: Go 1.27.1 Test & Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go 1.25.1
+      - name: Set up Go 1.27.1
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.1"
+          go-version: "1.27.1"
           cache: true
 
       - name: Run Go Tests with Race Detection
@@ -71,7 +71,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Status | Details |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Go Tests & Race Detector** | ✅ Passed | Ran with \`-race\` on Go 1.25.1 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Go Tests & Race Detector** | ✅ Passed | Ran with \`-race\` on Go 1.27.1 |" >> $GITHUB_STEP_SUMMARY
           echo "| **Binary Build & Smoke Tests** | ✅ Passed | Tested \`version\`, \`plugins list\`, and \`validate\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Docker Build** | ✅ Passed | Multi-stage Dockerfile built cleanly |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

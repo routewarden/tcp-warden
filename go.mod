@@ -1,6 +1,6 @@
 module github.com/routewarden/tcp-warden
 
-go 1.25.1
+go 1.27.1
 
 require (
 	github.com/glebarez/sqlite v1.11.0

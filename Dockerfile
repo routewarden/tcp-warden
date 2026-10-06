@@ -11,7 +11,7 @@
 # Stage 1 – compile (runs on the NATIVE host platform via cross-compilation,
 #           avoids QEMU emulation for the expensive Go build step)
 # ──────────────────────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 # These are populated automatically by BuildKit from the --platform flag
 ARG TARGETOS

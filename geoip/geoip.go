@@ -263,7 +263,7 @@ func (r *mmdbReader) Lookup(ip net.IP) (string, string, bool) {
 	}
 
 	node := uint32(0)
-	for bitIdx := 0; bitIdx < 128; bitIdx++ {
+	for bitIdx := range 128 {
 		byteVal := ip16[bitIdx/8]
 		bit := (byteVal >> (7 - (bitIdx % 8))) & 1
 		next, err := r.readNode(node, bit)

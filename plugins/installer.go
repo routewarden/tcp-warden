@@ -15,6 +15,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/routewarden/tcp-warden/plugins/sdk"
 )
 
@@ -155,6 +157,27 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 		}
 	}
 
+	// ─── Resolve External Dependencies & Stage Package ──────────────────
+	reqs := extractModuleRequirements(targetDir)
+	if err := applyModuleRequirements(opts.ProjectDir, reqs); err != nil {
+		fmt.Printf("⚠️  warning applying dependencies for %s: %v\n", manifest.Name, err)
+	}
+
+	if err := cleanupNestedGoMod(targetDir); err != nil {
+		fmt.Printf("⚠️  nested module cleanup warning for %s: %v\n", manifest.Name, err)
+	}
+
+	allGoPath := filepath.Join(opts.PluginsDir, "all", "all.go")
+	if err := registerInAllGo(allGoPath, manifest.Name); err != nil {
+		return nil, fmt.Errorf("registering plugin in all.go: %w", err)
+	}
+
+	if err := syncModuleDependencies(opts.ProjectDir); err != nil {
+		fmt.Printf("⚠️  [2/5 RESOLVE] dependency sync warning for %s: %v\n", manifest.Name, err)
+	} else if len(reqs) > 0 {
+		fmt.Printf("✓ [2/5 RESOLVE] %s dependencies synchronized (%d requirements)\n", manifest.Name, len(reqs))
+	}
+
 	// ─── Step 3: Compile Plugin Source ──────────────────────────────────
 	compileCtx, compileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer compileCancel()
@@ -171,9 +194,11 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 		} else {
 			compileErrStr := fmt.Sprintf("compilation failed: %v (output: %s)", compileErr, compileOut.String())
 			fmt.Printf("❌ [3/5 COMPILE] %s %s\n", manifest.Name, compileErrStr)
+			_ = unregisterFromAllGo(allGoPath, manifest.Name)
 			if stagingAbs != targetAbs {
 				_ = os.RemoveAll(targetDir)
 			}
+			_ = syncModuleDependencies(opts.ProjectDir)
 			return nil, fmt.Errorf("plugin %q compilation failed: %w (output: %s)", manifest.Name, compileErr, compileOut.String())
 		}
 	} else {
@@ -208,10 +233,7 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 	}
 
 	// ─── Step 5: Accept & Integrate ─────────────────────────────────────
-	allGoPath := filepath.Join(opts.PluginsDir, "all", "all.go")
-	if err := registerInAllGo(allGoPath, manifest.Name); err != nil {
-		return nil, fmt.Errorf("registering plugin in all.go: %w", err)
-	}
+	_ = registerInAllGo(allGoPath, manifest.Name)
 
 	rebuilt := false
 	if !opts.NoBuild {
@@ -225,6 +247,7 @@ func InstallPlugin(source string, opts InstallOptions) (*InstallResult, error) {
 			if stagingAbs != targetAbs {
 				_ = os.RemoveAll(targetDir)
 			}
+			_ = syncModuleDependencies(opts.ProjectDir)
 			fmt.Printf("❌ [5/5 ACCEPT] %s binary rebuild failed: %v (rolled back)\n", manifest.Name, bErr)
 			return nil, fmt.Errorf("plugin compilation failed during binary rebuild: %v (output: %s)", bErr, string(buildOut))
 		}
@@ -408,6 +431,11 @@ func SyncPluginFromSource(name string, source string, opts InstallOptions) (*Ins
 	opts.PluginsDir = ResolvePluginsDir(opts.PluginsDir, opts.ProjectDir)
 
 	name = strings.ToLower(strings.TrimSpace(name))
+	if name != "" {
+		if err := validatePluginName(name); err != nil {
+			return nil, err
+		}
+	}
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return nil, errors.New("plugin source cannot be empty")
@@ -577,7 +605,15 @@ func stagePluginSource(source string) (string, bool, error) {
 
 		sourceDir := cloneDir
 		if subPath != "" {
-			sourceDir = filepath.Join(cloneDir, subPath)
+			cleanSubPath := filepath.Clean(subPath)
+			if strings.HasPrefix(cleanSubPath, "..") || filepath.IsAbs(cleanSubPath) {
+				return "", false, fmt.Errorf("plugin subpath %q attempts path traversal outside repository", subPath)
+			}
+			sourceDir = filepath.Join(cloneDir, cleanSubPath)
+			rel, err := filepath.Rel(cloneDir, sourceDir)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				return "", false, fmt.Errorf("plugin subpath %q escapes repository root", subPath)
+			}
 			if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
 				return "", false, fmt.Errorf("plugin subpath %q not found in repository %s", subPath, repoURL)
 			}
@@ -591,6 +627,15 @@ func stagePluginSource(source string) (string, bool, error) {
 		if err := copyDir(sourceDir, finalTmpDir); err != nil {
 			os.RemoveAll(finalTmpDir)
 			return "", false, fmt.Errorf("staging cloned plugin files: %w", err)
+		}
+
+		// If root clone had a go.mod but subfolder didn't have one, copy root go.mod as go.mod.upstream
+		rootMod := filepath.Join(cloneDir, "go.mod")
+		subMod := filepath.Join(finalTmpDir, "go.mod")
+		if _, err := os.Stat(subMod); os.IsNotExist(err) {
+			if _, err := os.Stat(rootMod); err == nil {
+				_ = copyFile(rootMod, filepath.Join(finalTmpDir, "go.mod.upstream"))
+			}
 		}
 
 		return finalTmpDir, true, nil
@@ -669,6 +714,104 @@ func unregisterFromAllGo(allGoPath string, pluginName string) error {
 	return os.WriteFile(allGoPath, []byte(res), 0644)
 }
 
+// extractModuleRequirements parses any go.mod, go.mod.upstream, or parent go.mod in dir
+// and returns a list of external module requirements ("module@version").
+func extractModuleRequirements(dir string) []string {
+	var reqs []string
+	seen := make(map[string]bool)
+
+	candidates := []string{
+		filepath.Join(dir, "go.mod"),
+		filepath.Join(dir, "go.mod.upstream"),
+	}
+
+	parent := filepath.Dir(dir)
+	if parent != "" && parent != dir && parent != "." && parent != "/" {
+		candidates = append(candidates, filepath.Join(parent, "go.mod"))
+	}
+
+	for _, cand := range candidates {
+		data, err := os.ReadFile(cand)
+		if err != nil {
+			continue
+		}
+		f, err := modfile.Parse(cand, data, nil)
+		if err != nil || f == nil {
+			continue
+		}
+		if f.Module != nil && f.Module.Mod.Path == "github.com/routewarden/tcp-warden" {
+			continue
+		}
+		for _, req := range f.Require {
+			if req.Mod.Path == "github.com/routewarden/tcp-warden" || req.Mod.Path == "" {
+				continue
+			}
+			spec := fmt.Sprintf("%s@%s", req.Mod.Path, req.Mod.Version)
+			if !seen[spec] {
+				seen[spec] = true
+				reqs = append(reqs, spec)
+			}
+		}
+	}
+	return reqs
+}
+
+// applyModuleRequirements adds module requirements to projectDir's go.mod using `go mod edit -require`.
+func applyModuleRequirements(projectDir string, reqs []string) error {
+	goModPath := filepath.Join(projectDir, "go.mod")
+	if _, err := os.Stat(goModPath); err != nil || len(reqs) == 0 {
+		return nil
+	}
+
+	for _, req := range reqs {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, "go", "mod", "edit", "-require", req)
+		cmd.Dir = projectDir
+		_ = cmd.Run()
+		cancel()
+	}
+	return nil
+}
+
+// cleanupNestedGoMod removes any nested go.mod, go.sum, go.work, and go.mod.upstream files
+// within dir so the plugin integrates as a subpackage within the host module.
+func cleanupNestedGoMod(dir string) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			base := filepath.Base(path)
+			if base == "go.mod" || base == "go.sum" || base == "go.work" || base == "go.work.sum" || base == "go.mod.upstream" {
+				_ = os.Remove(path)
+			}
+		}
+		return nil
+	})
+}
+
+// syncModuleDependencies runs `go mod tidy` in projectDir if a go.mod file is present.
+func syncModuleDependencies(projectDir string) error {
+	goModPath := filepath.Join(projectDir, "go.mod")
+	if _, err := os.Stat(goModPath); err != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "mod", "tidy")
+	cmd.Dir = projectDir
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("go mod tidy in %s: %w (output: %s)", projectDir, err, out.String())
+	}
+	return nil
+}
+
 // UninstallPlugin removes an installed plugin.
 func UninstallPlugin(name string, opts InstallOptions) error {
 	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
@@ -678,8 +821,8 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 	}
 
 	nameKey := strings.ToLower(strings.TrimSpace(name))
-	if nameKey == "" || nameKey == "." || nameKey == "/" || strings.Contains(nameKey, "..") {
-		return errors.New("invalid or empty plugin name")
+	if err := validatePluginName(nameKey); err != nil {
+		return fmt.Errorf("invalid plugin name: %w", err)
 	}
 
 	allGoPath := filepath.Join(opts.PluginsDir, "all", "all.go")
@@ -689,6 +832,8 @@ func UninstallPlugin(name string, opts InstallOptions) error {
 	_ = os.RemoveAll(targetDir)
 
 	_ = removeInstalledEntry(opts.ProjectDir, nameKey)
+
+	_ = syncModuleDependencies(opts.ProjectDir)
 
 	if !opts.NoBuild {
 		ensureBuildPrerequisites(opts.ProjectDir)
@@ -881,6 +1026,17 @@ func copyDir(src, dst string) error {
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(srcPath)
+			if err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(src, target)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+		}
 
 		if entry.IsDir() {
 			if entry.Name() == ".git" {
@@ -1168,8 +1324,8 @@ type CreatePluginResult struct {
 // CreatePlugin generates a complete, working modular plugin scaffold.
 func CreatePlugin(opts CreatePluginOptions) (*CreatePluginResult, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.Name))
-	if name == "" {
-		return nil, errors.New("plugin name cannot be empty")
+	if err := validatePluginName(name); err != nil {
+		return nil, fmt.Errorf("invalid plugin name: %w", err)
 	}
 
 	opts.ProjectDir = ResolveProjectDir(opts.ProjectDir)
@@ -1409,3 +1565,20 @@ func TestPlugin_SelfTest(t *testing.T) {
 		ManifestPath:   manifestPath,
 	}, nil
 }
+
+func validatePluginName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("plugin name cannot be empty")
+	}
+	if strings.ContainsAny(name, "/\\:") || strings.Contains(name, "..") {
+		return fmt.Errorf("plugin name %q contains path separators or traversal characters", name)
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return fmt.Errorf("plugin name %q contains invalid characters (allowed: alphanumeric, underscore, hyphen)", name)
+		}
+	}
+	return nil
+}
+

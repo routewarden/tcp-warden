@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -322,7 +323,7 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&req); err != nil {
 		writeJSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -331,13 +332,16 @@ func (a *APIServer) handleUnban(w http.ResponseWriter, r *http.Request) {
 	if host, _, err := net.SplitHostPort(req.IP); err == nil {
 		req.IP = host
 	}
+	req.IP = strings.Trim(req.IP, "[]")
 	if idx := strings.IndexByte(req.IP, '%'); idx != -1 {
 		req.IP = req.IP[:idx]
 	}
-	if req.IP == "" || net.ParseIP(req.IP) == nil {
+	parsedIP := net.ParseIP(req.IP)
+	if req.IP == "" || parsedIP == nil {
 		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
 	}
+	req.IP = parsedIP.String()
 
 	unbanned := a.banlist.Unban(req.IP)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -357,7 +361,7 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 		Reason   string `json:"reason"`
 		Duration string `json:"duration"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&req); err != nil {
 		writeJSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -366,19 +370,26 @@ func (a *APIServer) handleBan(w http.ResponseWriter, r *http.Request) {
 	if host, _, err := net.SplitHostPort(req.IP); err == nil {
 		req.IP = host
 	}
+	req.IP = strings.Trim(req.IP, "[]")
 	if idx := strings.IndexByte(req.IP, '%'); idx != -1 {
 		req.IP = req.IP[:idx]
 	}
-	if req.IP == "" || net.ParseIP(req.IP) == nil {
+	parsedIP := net.ParseIP(req.IP)
+	if req.IP == "" || parsedIP == nil {
 		writeJSONError(w, "invalid or missing ip", http.StatusBadRequest)
 		return
 	}
+	req.IP = parsedIP.String()
 
 	dur := a.cfg.Global.BanDuration.Duration()
 	if req.Duration != "" {
 		parsed, err := time.ParseDuration(req.Duration)
 		if err != nil {
 			writeJSONError(w, fmt.Sprintf("invalid duration %q: use Go duration format e.g. '2h', '30m', '1h30m'", req.Duration), http.StatusBadRequest)
+			return
+		}
+		if parsed <= 0 {
+			writeJSONError(w, "duration must be positive", http.StatusBadRequest)
 			return
 		}
 		dur = parsed

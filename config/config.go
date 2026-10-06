@@ -1235,9 +1235,13 @@ func (c *Config) Validate() error {
 
 func isValidIPOrCIDR(s string) bool {
 	s = strings.TrimSpace(s)
+	if idx := strings.IndexByte(s, '%'); idx != -1 {
+		s = s[:idx]
+	}
 	if strings.Contains(s, "/") {
 		_, _, err := net.ParseCIDR(s)
 		return err == nil
 	}
 	return net.ParseIP(s) != nil
 }
+

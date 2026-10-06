@@ -391,4 +391,48 @@ func TestBanList_ConcurrentStress(t *testing.T) {
 	}
 }
 
+// ── Security Boundary Test: IPv4-mapped IPv6, port, and bracket canonicalization ──
+
+func TestBanList_IPv4MappedIPv6AndBracketCanonicalization(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// 1. Ban IPv4, query via IPv4-mapped IPv6
+	bl.Ban("192.168.1.10", "dual_stack_test", "web", time.Hour)
+	if entry, banned := bl.IsBanned("::ffff:192.168.1.10"); !banned {
+		t.Error("expected ::ffff:192.168.1.10 to be banned when 192.168.1.10 is banned")
+	} else if entry.IP != "192.168.1.10" {
+		t.Errorf("expected canonical entry IP 192.168.1.10, got %s", entry.IP)
+	}
+
+	// 2. Ban via IPv4-mapped IPv6, query via standard IPv4
+	bl.Ban("::ffff:10.0.0.5", "mapped_ban_test", "web", time.Hour)
+	if entry, banned := bl.IsBanned("10.0.0.5"); !banned {
+		t.Error("expected 10.0.0.5 to be banned when ::ffff:10.0.0.5 was banned")
+	} else if entry.IP != "10.0.0.5" {
+		t.Errorf("expected canonical entry IP 10.0.0.5, got %s", entry.IP)
+	}
+
+	// 3. Ban bracketed IPv6 with port, query plain IPv6
+	bl.Ban("[2001:db8::1]:8443", "bracket_port_test", "web", time.Hour)
+	if entry, banned := bl.IsBanned("2001:db8::1"); !banned {
+		t.Error("expected 2001:db8::1 to be banned when [2001:db8::1]:8443 was banned")
+	} else if entry.IP != "2001:db8::1" {
+		t.Errorf("expected canonical entry IP 2001:db8::1, got %s", entry.IP)
+	}
+
+	// 4. Query with brackets and port should also match
+	if _, banned := bl.IsBanned("[2001:db8::1]:9999"); !banned {
+		t.Error("expected [2001:db8::1]:9999 to match ban for 2001:db8::1")
+	}
+
+	// 5. Unban using IPv4-mapped IPv6 format with brackets
+	if !bl.Unban("[::ffff:192.168.1.10]") {
+		t.Error("expected Unban for [::ffff:192.168.1.10] to return true")
+	}
+	if _, banned := bl.IsBanned("192.168.1.10"); banned {
+		t.Error("expected 192.168.1.10 to no longer be banned after unban")
+	}
+}
+
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1479,6 +1480,87 @@ func TestAPI_BanAndUnban_SecurityBoundaries(t *testing.T) {
 		t.Error("expected 2001:db8::cafe to be unbanned")
 	}
 }
+
+// PC-9: EventBus rapid event publication without deadlock
+func TestEventBus_RapidDispatch(t *testing.T) {
+	bus := NewEventBus()
+	defer bus.Close()
+
+	ch, unsub := bus.Subscribe(2000)
+	defer unsub()
+
+	count := 1000
+	for i := 0; i < count; i++ {
+		bus.Publish(SecurityEvent{Type: "security_event", ClientIP: "192.0.2.1", Timestamp: time.Now()})
+	}
+
+	received := 0
+	for i := 0; i < count; i++ {
+		select {
+		case <-ch:
+			received++
+		case <-time.After(100 * time.Millisecond):
+			break
+		}
+	}
+	if received != count {
+		t.Errorf("expected %d events, received %d", count, received)
+	}
+}
+
+// PC-10: StatsRegistry concurrent increments
+func TestStatsRegistry_ConcurrentAccess(t *testing.T) {
+	stats := NewStatsRegistry()
+	workers := 50
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := stats.GetOrCreate("test-service")
+			for j := 0; j < 50; j++ {
+				s.ConnAccepted()
+				s.AddBytes(1024, 2048)
+				s.AddBlocked()
+				s.ConnClosed()
+				_ = s.Snapshot()
+			}
+		}()
+	}
+
+	wg.Wait()
+	s := stats.GetOrCreate("test-service")
+	snap := s.Snapshot()
+	if snap.TotalConnections != int64(workers*50) {
+		t.Errorf("expected %d total connections, got %d", workers*50, snap.TotalConnections)
+	}
+}
+
+// PC-6: RateLimiter boundary conditions
+func TestRateLimiter_BoundaryConditions(t *testing.T) {
+	rl := NewRateLimiter()
+
+	// Rate <= 0 should allow (disabled rate limit)
+	if !rl.Allow("svc", "192.0.2.10", 0, 0) {
+		t.Error("expected rate 0 to allow (disabled rate limiter)")
+	}
+
+	// Burst = 0 with positive rate
+	allowed := rl.Allow("svc", "192.0.2.11", 60, 0)
+	_ = allowed
+}
+
+// PC-7: FailureTracker zero window
+func TestFailureTracker_ZeroWindow(t *testing.T) {
+	ft := NewFailureTracker()
+	// Zero duration window means failures expire immediately
+	c1 := ft.RecordFailure("ssh", "192.0.2.20", 0)
+	if c1 < 1 {
+		t.Errorf("expected failure record to return at least 1, got %d", c1)
+	}
+}
+
 
 
 

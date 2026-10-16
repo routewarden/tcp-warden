@@ -27,7 +27,7 @@ import (
 var defaultConfigFile []byte
 
 var (
-	version = "3.3.0"
+	version = "3.4.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -455,9 +455,15 @@ func handleBan(args []string) {
 // If truncated, the last codepoint is replaced by a single '…' (ellipsis),
 // preserving column-alignment in table output.
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
+	}
+	if maxLen == 1 {
+		return "…"
 	}
 	return string(runes[:maxLen-1]) + "…"
 }

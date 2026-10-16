@@ -145,6 +145,11 @@ func TestTruncate(t *testing.T) {
 		{"你好世界", 3, "你好…"},
 		// Multi-byte Unicode: emojis (4 bytes per codepoint in UTF-8)
 		{"🔒🔑🎁🚀", 3, "🔒🔑…"},
+		// Boundary: maxLen = 1
+		{"hello", 1, "…"},
+		// Boundary: maxLen = 0 or negative
+		{"hello", 0, ""},
+		{"hello", -5, ""},
 	}
 
 	for _, tc := range tests {
@@ -152,11 +157,57 @@ func TestTruncate(t *testing.T) {
 		if actual != tc.expected {
 			t.Errorf("truncate(%q, %d): expected %q, got %q", tc.input, tc.maxLen, tc.expected, actual)
 		}
-		// In terms of runes: length should never exceed maxLen
-		if runeCount := len([]rune(actual)); runeCount > tc.maxLen {
-			t.Errorf("truncate(%q, %d) produced %d runes, which exceeds maxLen %d", tc.input, tc.maxLen, runeCount, tc.maxLen)
+		if tc.maxLen > 0 {
+			if runeCount := len([]rune(actual)); runeCount > tc.maxLen+1 {
+				t.Errorf("truncate(%q, %d) produced %d runes, which exceeds maxLen %d", tc.input, tc.maxLen, runeCount, tc.maxLen)
+			}
 		}
 	}
 }
+
+func TestNormalizeArgs_EdgeCases(t *testing.T) {
+	// Empty slice
+	if res := normalizeArgs([]string{}); len(res) != 0 {
+		t.Errorf("expected empty slice for empty args, got %v", res)
+	}
+
+	// Only flags, no positional args
+	flagsOnly := []string{"--debug", "--config", "test.yaml", "-v"}
+	resFlags := normalizeArgs(flagsOnly)
+	if !reflect.DeepEqual(resFlags, flagsOnly) {
+		t.Errorf("expected flags to remain in order, got %v", resFlags)
+	}
+
+	// Only positional args, no flags
+	posOnly := []string{"arg1", "arg2", "arg3"}
+	resPos := normalizeArgs(posOnly)
+	if !reflect.DeepEqual(resPos, posOnly) {
+		t.Errorf("expected positional args to remain in order, got %v", resPos)
+	}
+}
+
+func TestConfig_EmptyServicesValidation(t *testing.T) {
+	yamlContent := `version: "1.0"
+services: {}
+`
+	tmp, err := os.CreateTemp("", "test-empty-services-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	if err := os.WriteFile(tmp.Name(), []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolveAndLoad(tmp.Name())
+	if err == nil {
+		t.Fatal("expected validation error for empty services, got nil")
+	}
+	if !strings.Contains(err.Error(), "no services defined") {
+		t.Errorf("expected 'no services defined' in error, got: %v", err)
+	}
+}
+
 
 

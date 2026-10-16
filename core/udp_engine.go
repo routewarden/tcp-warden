@@ -112,7 +112,11 @@ func (d *Daemon) handleUDPPacket(
 	defer func() {
 		if r := recover(); r != nil {
 			block(fmt.Sprintf("panic in udp handler: %v", r))
-			d.oplog.Error("[PANIC] Recovered in UDP packet handler for %s (%s): %v", svc.Name, clientIP, r)
+			if d.oplog != nil {
+				d.oplog.Error("[PANIC] Recovered in UDP packet handler for %s (%s): %v", svc.Name, clientIP, r)
+			} else {
+				DefaultLogger().Error("[PANIC] Recovered in UDP packet handler for %s (%s): %v", svc.Name, clientIP, r)
+			}
 		}
 	}()
 
@@ -123,7 +127,7 @@ func (d *Daemon) handleUDPPacket(
 	}
 
 	// ── Stage 2: CrowdSec LAPI Bouncer ───────────────────────────────────
-	if d.cfg.CrowdSec.Enabled && d.crowdsec != nil {
+	if d.cfg != nil && d.cfg.CrowdSec.Enabled && d.crowdsec != nil {
 		if dec, hasDec := d.crowdsec.Check(clientIP); hasDec {
 			if strings.EqualFold(dec.Action, "ban") {
 				block(fmt.Sprintf("crowdsec_ban: %s", dec.Scenario))
@@ -159,7 +163,11 @@ func (d *Daemon) handleUDPPacket(
 	}
 
 	// ── Stage 7: Session Lookup / Creation ───────────────────────────────
-	targetUpstream, err := svc.ResolveUpstream(listenConn.LocalAddr())
+	var localAddr net.Addr
+	if listenConn != nil {
+		localAddr = listenConn.LocalAddr()
+	}
+	targetUpstream, err := svc.ResolveUpstream(localAddr)
 	if err != nil {
 		targetUpstream = svc.Upstream
 	}

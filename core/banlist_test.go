@@ -435,4 +435,69 @@ func TestBanList_IPv4MappedIPv6AndBracketCanonicalization(t *testing.T) {
 	}
 }
 
+// BL-1: Concurrent ban and unban operations
+func TestBanList_ConcurrentRace(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	workers := 50
+	done := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			ip := fmt.Sprintf("192.0.2.%d", id%10)
+			for j := 0; j < 50; j++ {
+				bl.Ban(ip, "race_test", "ssh", time.Hour)
+				_, _ = bl.IsBanned(ip)
+				bl.Unban(ip)
+				_ = bl.All()
+			}
+		}(i)
+	}
+
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+}
+
+// BL-2 to BL-8: BanList Edge Cases
+func TestBanList_EdgeCases(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+
+	// BL-3: Query never-banned IP
+	if _, ok := bl.IsBanned("203.0.113.1"); ok {
+		t.Error("expected unbanned IP to return false")
+	}
+
+	// BL-4: Unban nonexistent IP
+	if bl.Unban("203.0.113.1") {
+		t.Error("expected Unban on unbanned IP to return false")
+	}
+
+	// BL-5: Ban with empty reason
+	bl.Ban("10.0.0.99", "", "ssh", time.Hour)
+	entry, ok := bl.IsBanned("10.0.0.99")
+	if !ok || entry.Reason != "" {
+		t.Errorf("expected empty reason ban to be accepted, got: %+v", entry)
+	}
+	bl.Unban("10.0.0.99")
+
+	// BL-2: Banning same IP twice with new duration
+	bl.Ban("10.0.0.100", "first", "ssh", 10*time.Minute)
+	bl.Ban("10.0.0.100", "second", "ssh", 2*time.Hour)
+	entry2, ok2 := bl.IsBanned("10.0.0.100")
+	if !ok2 || entry2.Reason != "second" {
+		t.Errorf("expected updated ban entry reason 'second', got: %+v", entry2)
+	}
+
+	// BL-8: All() returns accurate count
+	bans := bl.All()
+	if len(bans) != bl.Count() {
+		t.Errorf("expected All() count %d to match bl.Count() %d", len(bans), bl.Count())
+	}
+}
+
+
 

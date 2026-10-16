@@ -464,3 +464,81 @@ func TestUDPEngine_BannedIP_Dropped(t *testing.T) {
 	}
 }
 
+// UDP-1: Zero-byte UDP packet handled safely
+func TestUDPEngine_ZeroBytePacket(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+	defer bus.Close()
+
+	d := &Daemon{
+		cfg:      &config.Config{},
+		banlist:  bl,
+		stats:    stats,
+		bus:      bus,
+		limiter:  NewRateLimiter(),
+		oplog:    DefaultLogger(),
+		pipeline: NewPipeline(&config.Config{}, bl, NewFailureTracker(), NewRateLimiter(), bus, stats, nil, nil),
+	}
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1234}
+	table := NewUDPSessionTable(5 * time.Second)
+	defer table.Close()
+
+	// Zero-byte packet should not panic
+	d.handleUDPPacket(context.Background(), nil, clientAddr, []byte{}, config.ServiceConfig{Name: "udp-zero", Upstream: "127.0.0.1:0"}, table)
+}
+
+// UDP-2: UDP packet from IPv6 address
+func TestUDPEngine_IPv6Client(t *testing.T) {
+	bl := NewBanList("")
+	defer bl.Close()
+	stats := NewStatsRegistry()
+	bus := NewEventBus()
+	defer bus.Close()
+
+	d := &Daemon{
+		cfg:      &config.Config{},
+		banlist:  bl,
+		stats:    stats,
+		bus:      bus,
+		limiter:  NewRateLimiter(),
+		oplog:    DefaultLogger(),
+		pipeline: NewPipeline(&config.Config{}, bl, NewFailureTracker(), NewRateLimiter(), bus, stats, nil, nil),
+	}
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("2001:db8::99"), Port: 5353}
+	table := NewUDPSessionTable(5 * time.Second)
+	defer table.Close()
+
+	d.handleUDPPacket(context.Background(), nil, clientAddr, []byte("hello-ipv6"), config.ServiceConfig{Name: "udp-v6", Upstream: "127.0.0.1:0"}, table)
+}
+
+// UDP-3: Concurrent session table access
+func TestUDPSessionTable_ConcurrentAccess(t *testing.T) {
+	table := NewUDPSessionTable(10 * time.Second)
+	defer table.Close()
+
+	workers := 50
+	done := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			key := fmt.Sprintf("192.0.2.%d:5000", id%5)
+			addr := &net.UDPAddr{IP: net.ParseIP(fmt.Sprintf("192.0.2.%d", id%5)), Port: 5000}
+			_, _, _ = table.GetOrCreate(key, func() (*UDPSession, error) {
+				c, _ := udpTestConn()
+				return &UDPSession{ClientAddr: addr, Upstream: c}, nil
+			})
+			_ = table.Len()
+		}(i)
+	}
+
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+}
+
+

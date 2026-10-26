@@ -266,3 +266,7 @@ docker compose up -d
 ## License
 
 MIT © [RouteWarden](https://github.com/routewarden)
+
+## ASN allowlisting
+
+See [ASN allowlisting](ASN_ALLOWLIST.md) for configuration, routing snapshot generation, and security behavior.
